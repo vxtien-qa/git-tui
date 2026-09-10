@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest a change to the workflow or the interface
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what makes it awkward today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Board layout
+      description: >
+        git-tui has one QA pipeline compiled in. If your request depends on
+        different columns or label names, describe them here.

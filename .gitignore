@@ -1,0 +1,22 @@
+# Build output
+/target
+*.bak
+
+# Release binaries are published as GitHub release assets, not committed
+/artifacts
+
+# Local agent notes and working documents
+/.agent
+
+# Local state: cached ticket data and the config, which holds Slack credentials
+/.cache/
+config.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp

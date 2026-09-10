@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+
+  build-linux:
+    needs: verify
+    name: Build x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update Cargo.toml version
+        run: |
+          sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      - name: Build release
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Rename artifact
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/git-tui git-tui-linux-x64
+          ls -lh git-tui-linux-x64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-tui-linux-x64
+          path: git-tui-linux-x64
+
+  build-macos:
+    needs: verify
+    name: Build macOS (x64 + arm64)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update Cargo.toml version
+        run: |
+          sed -i.bak "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+
+      - name: Build arm64 (native)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build x64 (cross-compile)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Rename artifacts
+        run: |
+          cp target/aarch64-apple-darwin/release/git-tui git-tui-darwin-arm64
+          cp target/x86_64-apple-darwin/release/git-tui git-tui-darwin-x64
+          ls -lh git-tui-darwin-arm64 git-tui-darwin-x64
+
+      - name: Upload arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-tui-darwin-arm64
+          path: git-tui-darwin-arm64
+
+      - name: Upload x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-tui-darwin-x64
+          path: git-tui-darwin-x64
+
+  build-windows:
+    needs: verify
+    name: Build x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update Cargo.toml version
+        shell: bash
+        run: |
+          sed -i.bak "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" Cargo.toml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          cp target/x86_64-pc-windows-msvc/release/git-tui.exe git-tui-windows-x64.exe
+          ls -lh git-tui-windows-x64.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-tui-windows-x64.exe
+          path: git-tui-windows-x64.exe
+
+  release:
+    name: Create Release
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: |
+          ls -R artifacts/
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+
+          # Move artifacts to current directory
+          mv artifacts/*/* .
+
+          # Create release with all binaries
+          gh release create "$TAG" \
+            --title "Release $TAG" \
+            --generate-notes \
+            git-tui-linux-x64 \
+            git-tui-darwin-x64 \
+            git-tui-darwin-arm64 \
+            git-tui-windows-x64.exe
