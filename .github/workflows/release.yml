@@ -191,10 +191,36 @@ jobs:
           # Move artifacts to current directory
           mv artifacts/*/* .
 
-          # Create release with all binaries
+          REPO="${{ github.repository }}"
+
+          # Release notes point at the changelog and the install commands,
+          # which is more use to someone landing here than a commit list.
+          NOTES=$(cat <<EOF
+          See [CHANGELOG.md](https://github.com/$REPO/blob/master/CHANGELOG.md) for what changed.
+
+          ## Install
+
+          macOS, Linux, or Windows with Git Bash:
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/$REPO/master/install.sh | bash
+          \`\`\`
+
+          Windows PowerShell:
+
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/$REPO/master/install.ps1 | iex
+          \`\`\`
+
+          Or download the binary for your platform below. git-tui needs the
+          [GitHub CLI](https://cli.github.com/) authorised with
+          \`gh auth login -s repo,project,read:org\`.
+          EOF
+          )
+
           gh release create "$TAG" \
-            --title "Release $TAG" \
-            --generate-notes \
+            --title "git-tui $TAG" \
+            --notes "$(echo "$NOTES" | sed 's/^          //')" \
             git-tui-linux-x64 \
             git-tui-darwin-x64 \
             git-tui-darwin-arm64 \
