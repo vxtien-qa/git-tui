@@ -16,6 +16,7 @@ All notable changes to git-tui. Versions follow [semantic versioning](https://se
 
 ### Changed
 
+- New bug reports, enhancements and tasks are filed into the sprint running today, read from the Sprint field's iteration dates. They used to inherit the parent ticket's sprint (falling back to the board's sprint filter), so a bug raised while QAing a carried-over ticket landed in the sprint that ticket came from - and on day one of a sprint, before any item sits in it, everything went to the previous one. The form's `Sprint (auto)` line now shows the same value that gets written.
 - Project fields are read over GraphQL. `gh project field-list` never returned the iteration configuration, so the Sprint field had no options at all and every "inherit the parent's Sprint" write silently found nothing to set.
 - The current sprint is taken from the iteration's real `startDate` and `duration`. The hardcoded date anchor is now only a fallback.
 - QA metrics are derived from the latest QA verdict per ticket, label-only passes included, so `passed + failed = tested` holds by construction. Previously a pass only counted once a ticket reached Tech Complete, which biased the pass rate downwards.

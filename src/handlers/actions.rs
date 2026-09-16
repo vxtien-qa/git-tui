@@ -367,16 +367,10 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
         }
         ConfirmAction::SubmitTask(parent_idx) => {
             let parent_idx = *parent_idx;
-            let (repo, parent_node_id, parent_sprint) = parent_idx
+            let (repo, parent_node_id) = parent_idx
                 .and_then(|idx| app.items.get(idx))
-                .map(|item| {
-                    (
-                        item.repository.clone(),
-                        item.content_node_id.clone(),
-                        item.sprint.clone(),
-                    )
-                })
-                .unwrap_or((None, None, None));
+                .map(|item| (item.repository.clone(), item.content_node_id.clone()))
+                .unwrap_or((None, None));
 
             let repo = repo.unwrap_or_else(|| app.config.bug_repo.clone()); // Assuming bug_repo is a reasonable default for tasks too
 
@@ -385,9 +379,11 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
             let prio = priorities[app.task_priority_idx].to_string();
             let stack = stacks[app.task_stack_idx].to_string();
 
-            // For now, Tasks don't natively capture the Sprint from UI, we'll assign it to None.
-            // In a future update we can inherit the Sprint from the Parent Issue.
-            let task_sprint: Option<String> = parent_sprint;
+            // Always the sprint running today, never the parent's: a task
+            // opened now is work for now, and the parent is routinely a ticket
+            // carried over from an older sprint. Matches the "Sprint (auto)"
+            // value the form shows.
+            let task_sprint: Option<String> = app.sprint_for_new_item();
 
             // Build body matching GitHub bug.yml template format
             let mut body = String::new();
@@ -763,10 +759,11 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
             let type_field_clone = app.type_field().cloned();
             let status_field_clone = app.status_field().cloned();
 
-            let parent_sprint = parent_idx
-                .and_then(|idx| app.items.get(idx))
-                .and_then(|item| item.sprint.clone())
-                .or_else(|| app.board_sprint_filter.clone());
+            // The sprint running today - not the parent's (a bug found while
+            // QAing a carried-over ticket still belongs to this sprint) and not
+            // `board_sprint_filter` (a view the user cycles freely, and one
+            // that is only ever seeded once at startup).
+            let new_item_sprint = app.sprint_for_new_item();
 
             let parent_node_id = parent_idx
                 .and_then(|idx| app.items.get(idx))
@@ -839,7 +836,7 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                                 }
                             }
                             // Sprint
-                            if let Some(sprint_val) = &parent_sprint {
+                            if let Some(sprint_val) = &new_item_sprint {
                                 match &sprint_field_clone {
                                     Some(field) => match field.find_option(sprint_val) {
                                         Some(opt) => {
@@ -866,7 +863,7 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                                 }
                             } else {
                                 warnings.push(
-                                    "✗ Sprint: no parent sprint or board filter set".to_string(),
+                                    "✗ Sprint: no iteration covers today on the project's Sprint field".to_string(),
                                 );
                             }
                             // Project-level Type field, when the board has one.
@@ -984,7 +981,7 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                             } else {
                                 None
                             },
-                            sprint: parent_sprint.clone(),
+                            sprint: new_item_sprint.clone(),
                             assignees: selected_assignee.clone(),
                             labels: kind.labels().iter().map(|l| l.to_string()).collect(),
                             repository: Some(repo.clone()),

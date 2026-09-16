@@ -214,8 +214,11 @@ pub fn render(f: &mut Frame, app: &App, parent_idx: Option<usize>, area: Rect) {
         Span::styled(" (Enter to search & assign)", theme::dim()),
     ]));
 
-    // Sprint (auto)
-    let sprint = app.board_sprint_filter.as_deref().unwrap_or("--");
+    // Sprint (auto) - the sprint running today, which is exactly what the
+    // submit handler writes. Showing `board_sprint_filter` here made the form
+    // promise a sprint the item never got.
+    let sprint_auto = app.sprint_for_new_item();
+    let sprint = sprint_auto.as_deref().unwrap_or("--");
     lines.push(Line::from(vec![
         Span::styled("   Sprint:     ", theme::dim()),
         Span::styled(format!("[{}]", sprint), theme::normal()),

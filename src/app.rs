@@ -984,6 +984,34 @@ impl App {
         Some(best_sprint.clone())
     }
 
+    /// The sprint a newly filed bug/task belongs to: the iteration whose
+    /// [start, start + duration) window contains today, straight from the
+    /// project's Sprint field.
+    ///
+    /// Deliberately NOT `current_sprint_name`: that one only accepts a sprint
+    /// that already has items, and only ever seeds `board_sprint_filter`,
+    /// which the user is free to cycle to any sprint. Either path files a
+    /// brand new bug into a sprint that closed weeks ago - on day one of a
+    /// sprint every ticket still sits in the previous one, so the "sprint with
+    /// the most open items" fallback answers with the old sprint. New items
+    /// follow the calendar, nothing else.
+    pub fn sprint_for_new_item(&self) -> Option<String> {
+        self.sprint_for_new_item_on(self.today_local())
+    }
+
+    /// `sprint_for_new_item` for an explicit date (the testable seam).
+    pub fn sprint_for_new_item_on(&self, today: NaiveDate) -> Option<String> {
+        if let Some(opt) = self
+            .sprint_field()
+            .and_then(|field| field.iteration_for_date(today))
+        {
+            return Some(opt.name.clone());
+        }
+        // No iteration dates to read (fields not loaded yet, or a board whose
+        // iterations carry none): the old heuristic beats no sprint at all.
+        self.current_sprint_name()
+    }
+
     /// Get sprint filter options in order: [current, previous, next, all].
     /// Current sprint determined by real-time date calculation.
     pub fn sprint_filter_options(&self) -> Vec<Option<String>> {
@@ -1726,5 +1754,117 @@ mod tests {
         assert!(App::label_eq("Ready for UAT", "Ready-for-UAT"));
         assert!(App::label_eq("ready-FOR-staging", "Ready for Staging"));
         assert!(!App::label_eq("Ready-for-UAT", "Ready-for-Staging"));
+    }
+
+    // ── Sprint for newly filed items ──────────────────────────────
+
+    /// A Sprint iteration field with real start dates, 14-day windows.
+    fn sprint_field_fixture() -> crate::models::field::Field {
+        use crate::models::field::{Field, FieldOption, FieldType};
+        let mut options = Vec::new();
+        // Sprint 12 starts Jan 19, 2026 - the project's real anchor.
+        let anchor = NaiveDate::from_ymd_opt(2026, 1, 19).unwrap();
+        for n in 12..=30 {
+            options.push(FieldOption {
+                id: format!("opt{}", n),
+                name: format!("Sprint {}", n),
+                start_date: Some(anchor + chrono::Duration::days((n - 12) as i64 * 14)),
+                duration_days: Some(14),
+            });
+        }
+        Field {
+            id: "sprint_field".into(),
+            name: "Sprint".into(),
+            field_type: FieldType::Iteration,
+            options,
+        }
+    }
+
+    fn app_with_sprint_field() -> App {
+        let mut app = App::new();
+        app.fields = vec![sprint_field_fixture()];
+        app
+    }
+
+    #[test]
+    fn test_sprint_for_new_item_is_the_iteration_containing_today() {
+        let mut app = app_with_sprint_field();
+        app.items = vec![Item {
+            sprint: Some("Sprint 28".into()),
+            ..Default::default()
+        }];
+
+        // Sprint 29: Sep 14 - Sep 27, 2026.
+        assert_eq!(
+            app.sprint_for_new_item_on(NaiveDate::from_ymd_opt(2026, 9, 16).unwrap()),
+            Some("Sprint 29".to_string())
+        );
+        // And it rolls over on its own once Sprint 30 starts (Sep 28).
+        assert_eq!(
+            app.sprint_for_new_item_on(NaiveDate::from_ymd_opt(2026, 9, 28).unwrap()),
+            Some("Sprint 30".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sprint_for_new_item_ignores_a_stale_board_filter() {
+        let mut app = app_with_sprint_field();
+        app.items = vec![Item {
+            sprint: Some("Sprint 28".into()),
+            ..Default::default()
+        }];
+        // The user cycled the board back to the previous sprint - a view
+        // filter must not decide where a brand new bug is filed.
+        app.board_sprint_filter = Some("Sprint 28".to_string());
+
+        assert_eq!(
+            app.sprint_for_new_item_on(NaiveDate::from_ymd_opt(2026, 9, 16).unwrap()),
+            Some("Sprint 29".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sprint_for_new_item_does_not_need_the_sprint_to_have_items_yet() {
+        let mut app = app_with_sprint_field();
+        // Day one of a new sprint: every existing ticket still sits in the old
+        // one. current_sprint_name() gates on sprints that have items, so it
+        // answers "Sprint 28" here - the new-item sprint must not.
+        app.items = vec![Item {
+            sprint: Some("Sprint 28".into()),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            app.sprint_for_new_item_on(NaiveDate::from_ymd_opt(2026, 9, 14).unwrap()),
+            Some("Sprint 29".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sprint_for_new_item_falls_back_when_the_field_carries_no_dates() {
+        use crate::models::field::{Field, FieldOption, FieldType};
+        let mut app = App::new();
+        app.fields = vec![Field {
+            id: "sprint_field".into(),
+            name: "Sprint".into(),
+            field_type: FieldType::Iteration,
+            options: vec![FieldOption {
+                id: "o28".into(),
+                name: "Sprint 28".into(),
+                start_date: None,
+                duration_days: None,
+            }],
+        }];
+        app.items = vec![Item {
+            sprint: Some("Sprint 28".into()),
+            ..Default::default()
+        }];
+
+        // No dates to read - fall back to the existing heuristic rather than
+        // filing the item with no sprint at all.
+        assert_eq!(
+            app.sprint_for_new_item_on(NaiveDate::from_ymd_opt(2026, 9, 16).unwrap()),
+            app.current_sprint_name()
+        );
     }
 }
