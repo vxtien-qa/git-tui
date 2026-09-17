@@ -16,6 +16,11 @@ All notable changes to git-tui. Versions follow [semantic versioning](https://se
 
 ### Changed
 
+- Every report line names the EPIC the ticket sits under, as `[Dave project]` or `[no epic]`, so a task or bug can be traced to its epic without opening it. The epic is found by walking the sub-issue chain: sync fetches only one parent level, so a ticket hanging off a story reaches its epic through the board. An epic is recognised by the `Epic` label or an `[Epic]` title prefix, because the board uses both.
+- Sprint report gains a `By EPIC` rollup - tickets, bugs, how many are in QA and how many were tested, passed and failed per epic, with everything outside an epic collected under `No EPIC`. The per-epic counts add up to the sprint totals.
+- Daily standup reads as three separate things that happened yesterday: `Tested & Verified`, `Failed` and `Issues found`. A ticket QA filed used to appear twice, once as a generic "Worked on ticket (Ready for Dev)" line and again under the bug heading, and a rejection sat in among the passes where the team could miss it.
+- `Issues found` covers bugs and QA-raised enhancements, replacing the bug-only section.
+- Reports say what QA is doing to a ticket: `Testing` for a task, `Verifying` for a bug or an enhancement QA raised. Only the report form's upper-case `[ENHANCEMENT]` title prefix counts as a QA finding - the plain `Enhancement` label is also on dev feature work, which is tested, not verified.
 - New bug reports, enhancements and tasks are filed into the sprint running today, read from the Sprint field's iteration dates. They used to inherit the parent ticket's sprint (falling back to the board's sprint filter), so a bug raised while QAing a carried-over ticket landed in the sprint that ticket came from - and on day one of a sprint, before any item sits in it, everything went to the previous one. The form's `Sprint (auto)` line now shows the same value that gets written.
 - Project fields are read over GraphQL. `gh project field-list` never returned the iteration configuration, so the Sprint field had no options at all and every "inherit the parent's Sprint" write silently found nothing to set.
 - The current sprint is taken from the iteration's real `startDate` and `duration`. The hardcoded date anchor is now only a fallback.
@@ -31,6 +36,7 @@ All notable changes to git-tui. Versions follow [semantic versioning](https://se
 
 ### Fixed
 
+- Report lines stay on one line. Titles carrying an embedded newline or a trailing space (a body pasted into the title field) broke the line in half, so a ticket's status and priority ended up on their own line in Slack.
 - Retest loop: `Return` and `Fail` now remove the `Ready-for-Staging` and `Ready-for-UAT` labels they added. A ticket coming back for retest kept them, which hid it from My Tasks and made the next pass refuse with "already passed".
 - GitHub's native issue type and sub-issue links are actually applied. Both mutations were handed the project item ID (`PVTI_...`) instead of the issue node ID (`I_kw...`), and both errors were discarded.
 - Item detail loads while a background sync is running. The automatic fetch shared its channel with the sync, whose timeline workers hold it open long after the item list arrives, so opening a ticket reported a load that never resolved and moving to another ticket dropped the previous one.

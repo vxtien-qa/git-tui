@@ -80,7 +80,7 @@ fn is_today(dt_utc: DateTime<Utc>, offset_hours: i32) -> bool {
 
 // ─── Shared data structures ─────────────────────────────────────────────────
 
-use crate::models::item::Item;
+use crate::models::item::{Item, ItemKind};
 
 /// An item tagged with whether it was done during OT.
 struct TaggedItem<'a> {
@@ -143,6 +143,14 @@ impl ActionKind {
         }
     }
 
+    /// Whether the verdict sent the ticket back to dev.
+    fn is_fail(&self) -> bool {
+        matches!(
+            self,
+            Self::FailedOnDev | Self::FailedOnStg | Self::FailedOnUat
+        )
+    }
+
     /// Significance level for chronological overwriting.
     /// Higher number = more significant (major status change > minor > comment).
     fn significance(&self) -> u8 {
@@ -191,13 +199,35 @@ struct DailyStandupData<'a> {
     sprint: String,
     user: String,
     date: String,
-    yesterday: Vec<YesterdayAction<'a>>,
+    /// QA work done on the previous workday that did NOT fail.
+    tested: Vec<YesterdayAction<'a>>,
+    /// Tickets QA rejected on the previous workday. Reported on their own:
+    /// sorted in among the passes they read as just more work done, while
+    /// they are the part of the standup the team has to act on.
+    failed: Vec<YesterdayAction<'a>>,
+    /// Bugs and QA-raised enhancements the user filed. Kept apart from
+    /// `tested` because filing an issue is not a test result, and it used to
+    /// appear twice: once as a generic "Worked on ticket (Ready for Dev)"
+    /// line and again in its own section.
+    issues_found: Vec<TaggedItem<'a>>,
     in_qa: Vec<TaggedItem<'a>>,
     blocked: Vec<TaggedItem<'a>>,
-    bugs_found: Vec<TaggedItem<'a>>,
     /// Sprint items with NO timeline data available - the Yesterday section
     /// may be undercounted while these are still being fetched.
     missing_history: usize,
+}
+
+/// Per-EPIC rollup for a sprint: which epic the sprint's tickets sit under,
+/// and how QA is doing inside each one.
+struct EpicGroup<'a> {
+    /// The epic issue, or `None` for tickets with no epic above them.
+    epic: Option<&'a Item>,
+    tickets: usize,
+    bugs: usize,
+    in_qa: usize,
+    tested: usize,
+    passed: usize,
+    failed: usize,
 }
 
 /// Collected data for a Sprint Report.
@@ -231,6 +261,8 @@ struct SprintReportData<'a> {
     /// waiting for a dev deploy. Counted separately: they are NOT work the QA
     /// still has to do, and reporting them as "to test" overstated the queue.
     waiting_deploy_count: usize,
+    // ─── Per-EPIC rollup ───
+    epics: Vec<EpicGroup<'a>>,
     // ─── Bugs ───
     bugs_in_uat: Vec<&'a Item>,
     bugs_blocked: Vec<&'a Item>,
@@ -514,8 +546,11 @@ fn collect_daily_standup(app: &App) -> DailyStandupData<'_> {
         }
     }
 
-    // 4. Bug Found: bugs created yesterday or today by the user
-    let mut bugs_found: Vec<TaggedItem<'_>> = Vec::new();
+    // 4. Issues found: bugs AND QA-raised enhancements created yesterday or
+    // today by the user. Only enhancements carrying the report form's
+    // `[ENHANCEMENT]` prefix count - the plain Enhancement label is also on
+    // dev feature work, which QA did not raise.
+    let mut issues_found: Vec<TaggedItem<'_>> = Vec::new();
     for item in &app.items {
         if app.board_sprint_filter.is_some()
             && item.sprint.as_deref() != app.board_sprint_filter.as_deref()
@@ -523,7 +558,7 @@ fn collect_daily_standup(app: &App) -> DailyStandupData<'_> {
             continue;
         }
         let is_bug = item.labels.iter().any(|l| l.to_lowercase().contains("bug"));
-        if !is_bug {
+        if !is_bug && !is_qa_enhancement_report(item) {
             continue;
         }
         let created_recently = item
@@ -537,7 +572,7 @@ fn collect_daily_standup(app: &App) -> DailyStandupData<'_> {
         let user_involved = item.assignees.iter().any(|a| a == &user);
         if user_involved {
             let ot_flag = item.created_at.map(|dt| is_ot(dt, tz)).unwrap_or(false);
-            bugs_found.push(TaggedItem {
+            issues_found.push(TaggedItem {
                 item,
                 is_ot: ot_flag,
             });
@@ -583,16 +618,26 @@ fn collect_daily_standup(app: &App) -> DailyStandupData<'_> {
         }
     }
 
-    // (Bugs Reported section removed - merged into Bug Found above)
+    // Filing an issue also lands in `yesterday` as a generic "Worked on
+    // ticket" status change, so the same ticket was reported twice under two
+    // different headings. The issue section wins: it says what actually
+    // happened.
+    let reported_ids: std::collections::HashSet<&str> =
+        issues_found.iter().map(|t| t.item.id.as_str()).collect();
+    let (failed, tested): (Vec<YesterdayAction<'_>>, Vec<YesterdayAction<'_>>) = yesterday
+        .into_iter()
+        .filter(|a| !reported_ids.contains(a.item.id.as_str()))
+        .partition(|a| a.kind.is_fail());
 
     DailyStandupData {
         sprint,
         user,
         date,
-        yesterday,
+        tested,
+        failed,
+        issues_found,
         in_qa,
         blocked,
-        bugs_found,
         missing_history,
     }
 }
@@ -685,17 +730,60 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
     let mut failed_count = 0usize;
     let mut retest_items: Vec<RetestInfo> = Vec::new();
     let mut missing_history = 0usize;
+    let mut epic_groups: std::collections::HashMap<Option<u32>, EpicGroup> =
+        std::collections::HashMap::new();
 
     for item in &items {
         let tl = load_timeline_for_item(item, &timeline_cache);
         if tl.missing {
             missing_history += 1;
         }
-        if tl.status_events.is_empty() && tl.label_events.is_empty() {
+        let has_history = !(tl.status_events.is_empty() && tl.label_events.is_empty());
+        let verdict = if has_history {
+            latest_qa_verdict(&tl)
+        } else {
+            None
+        };
+
+        // ─── Per-EPIC rollup ───
+        //
+        // Counted for EVERY sprint ticket, including those with no timeline
+        // yet: a group's ticket count is a board fact, not a QA metric.
+        let epic = resolve_epic(item, &app.items).filter(|e| e.number.is_some());
+        let group = epic_groups
+            .entry(epic.and_then(|e| e.number))
+            .or_insert_with(|| EpicGroup {
+                epic,
+                tickets: 0,
+                bugs: 0,
+                in_qa: 0,
+                tested: 0,
+                passed: 0,
+                failed: 0,
+            });
+        group.tickets += 1;
+        if item.labels.iter().any(|l| l.to_lowercase().contains("bug")) {
+            group.bugs += 1;
+        }
+        if matches!(item.status, Status::InQA | Status::InQADev | Status::InUAT) {
+            group.in_qa += 1;
+        }
+        match verdict {
+            Some((QaVerdict::Passed, _)) => {
+                group.tested += 1;
+                group.passed += 1;
+            }
+            Some((QaVerdict::Failed, _)) => {
+                group.tested += 1;
+                group.failed += 1;
+            }
+            None => {}
+        }
+
+        if !has_history {
             continue;
         }
 
-        let verdict = latest_qa_verdict(&tl);
         match verdict {
             Some((QaVerdict::Passed, _)) => {
                 tested_count += 1;
@@ -747,6 +835,12 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
 
     // Sort retested items by fail count descending
     retest_items.sort_by_key(|a| std::cmp::Reverse(a.fail_count));
+
+    // Biggest epic first, and "no epic" last - it is a catch-all bucket
+    // (loose tickets plus everything hanging off a story or a sprint task),
+    // not a group anyone owns.
+    let mut epics: Vec<EpicGroup> = epic_groups.into_values().collect();
+    epics.sort_by_key(|g| (g.epic.is_none(), std::cmp::Reverse(g.tickets)));
 
     // ─── Pipeline-grouped counts (add up to total) ───
     let not_started_count = items
@@ -854,6 +948,7 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
         passed_count,
         failed_count,
         retest_items,
+        epics,
         tickets_to_test,
         bugs_to_verify,
         waiting_deploy_count,
@@ -917,7 +1012,114 @@ fn issue_link_slack(item: &Item, owner: &str) -> String {
 /// Escaped title for webhook-sent Slack reports - titles are user-supplied
 /// and must not be interpretable as Slack directives (see webhook::escape_mrkdwn).
 fn title_slack(item: &Item) -> String {
-    crate::slack::webhook::escape_mrkdwn(&item.title)
+    crate::slack::webhook::escape_mrkdwn(&clean_title(&item.title))
+}
+
+/// Title on one line.
+///
+/// Titles come straight from GitHub and some carry an embedded newline or a
+/// trailing space (a body pasted into the title field). Printed raw they broke
+/// a report line in half, so the status and priority of a ticket ended up on
+/// their own line in Slack.
+fn clean_title(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether an issue is an EPIC.
+///
+/// The board is not consistent about this: some epics carry the `Epic` label,
+/// others only the `[Epic]` title prefix, so both signals count.
+fn is_epic(item: &Item) -> bool {
+    item.labels.iter().any(|l| App::label_eq(l, "Epic"))
+        || clean_title(&item.title)
+            .to_lowercase()
+            .starts_with("[epic]")
+}
+
+/// Longest epic name a report line will carry.
+const EPIC_NAME_MAX: usize = 32;
+
+/// Depth cap for the parent walk - a cycle on the board would otherwise hang
+/// the report.
+const MAX_PARENT_HOPS: usize = 4;
+
+/// Epic name without its `[Epic]` prefix, short enough for a report line.
+fn epic_short_name(item: &Item) -> String {
+    let title = clean_title(&item.title);
+    let name = title
+        .strip_prefix("[Epic]")
+        .or_else(|| title.strip_prefix("[EPIC]"))
+        .or_else(|| title.strip_prefix("[epic]"))
+        .unwrap_or(title.as_str())
+        .trim()
+        .to_string();
+    if name.chars().count() > EPIC_NAME_MAX {
+        let cut: String = name.chars().take(EPIC_NAME_MAX).collect();
+        format!("{}...", cut.trim_end())
+    } else {
+        name
+    }
+}
+
+/// The EPIC an item belongs to, found by walking up the sub-issue chain.
+///
+/// Sync fetches only ONE parent level (`parent_number`), so the rest of the
+/// chain is rebuilt from the board itself: the parent is looked up among the
+/// loaded items and its own parent read from there. Most tickets hang straight
+/// off an epic, but some sit under a story that hangs off one.
+///
+/// Matching on number AND repository is deliberate: the project spans several
+/// repositories and the same issue number exists in more than one of them.
+fn resolve_epic<'a>(item: &Item, items: &'a [Item]) -> Option<&'a Item> {
+    let mut parent_number = item.parent_number;
+    let repo = item.repository.as_deref();
+    for _ in 0..MAX_PARENT_HOPS {
+        let number = parent_number?;
+        let parent = items
+            .iter()
+            .find(|i| i.number == Some(number) && i.repository.as_deref() == repo)?;
+        if is_epic(parent) {
+            return Some(parent);
+        }
+        parent_number = parent.parent_number;
+    }
+    None
+}
+
+/// Whether an enhancement was raised BY QA.
+///
+/// The tool's own form writes the `[ENHANCEMENT]` title prefix
+/// (`ReportKind::title_prefix`), so that upper-case spelling marks a QA
+/// finding. The match is case-sensitive on purpose: the board also carries
+/// dev tickets titled `[Enhancement][BE] Refactor ...`, which are feature
+/// work to test, not a QA finding to verify.
+fn is_qa_enhancement_report(item: &Item) -> bool {
+    clean_title(&item.title).starts_with(crate::app::ReportKind::Enhancement.title_prefix())
+}
+
+/// What QA does to a ticket.
+///
+/// A bug fix and a QA-raised enhancement come back from dev to be verified; a
+/// task - and an enhancement that is really feature work carrying the
+/// Enhancement label - gets tested. Saying "testing" for all of them read as
+/// if every ticket were a fresh feature pass.
+fn qa_verb(item: &Item) -> &'static str {
+    if is_qa_enhancement_report(item) {
+        return "Verifying";
+    }
+    match item.kind() {
+        ItemKind::Bug => "Verifying",
+        ItemKind::Enhancement | ItemKind::Task => "Testing",
+    }
+}
+
+/// Epic prefix for a ticket line: `[Dave project] `, or `[no epic] ` when the
+/// chain above the ticket holds no epic at all.
+fn epic_tag(item: &Item, items: &[Item]) -> String {
+    match resolve_epic(item, items) {
+        Some(epic) => format!("[{}] ", epic_short_name(epic)),
+        None => "[no epic] ".to_string(),
+    }
 }
 
 /// Resolve a GitHub username to a human-readable display name for copy-paste formats.
@@ -947,23 +1149,58 @@ pub fn daily_standup_md(app: &App) -> String {
     ));
     push_missing_history_warning(&mut r, data.missing_history, "- ");
 
-    // Yesterday
-    r.push_str("### Yesterday\n");
-    if data.yesterday.is_empty() {
+    // Yesterday - what was tested and passed
+    r.push_str("### Yesterday - Tested & Verified\n");
+    if data.tested.is_empty() {
         r.push_str("- (none)\n");
     } else {
-        for a in &data.yesterday {
-            let num = issue_link_md(a.item);
-            let prio = a.item.priority.as_deref().unwrap_or("--");
-            let ot = if a.is_ot { " (OT)" } else { "" };
+        for a in &data.tested {
             r.push_str(&format!(
-                "- {} {} ({}, {}) → {}{}\n",
-                num,
-                a.item.title,
+                "- {}{} {} ({}, {}) → {}{}\n",
+                epic_tag(a.item, &app.items),
+                issue_link_md(a.item),
+                clean_title(&a.item.title),
                 a.item.status.label(),
-                prio,
+                a.item.priority.as_deref().unwrap_or("--"),
                 a.kind.full_description(),
-                ot
+                if a.is_ot { " (OT)" } else { "" },
+            ));
+        }
+    }
+
+    // Yesterday - what was sent back to dev
+    r.push_str("\n### Yesterday - Failed\n");
+    if data.failed.is_empty() {
+        r.push_str("- (none)\n");
+    } else {
+        for f in &data.failed {
+            r.push_str(&format!(
+                "- {}{} {} ({}, {}) → {}{}\n",
+                epic_tag(f.item, &app.items),
+                issue_link_md(f.item),
+                clean_title(&f.item.title),
+                f.item.status.label(),
+                f.item.priority.as_deref().unwrap_or("--"),
+                f.kind.full_description(),
+                if f.is_ot { " (OT)" } else { "" },
+            ));
+        }
+    }
+
+    // Yesterday - what was filed
+    r.push_str("\n### Yesterday - Issues found\n");
+    if data.issues_found.is_empty() {
+        r.push_str("- (none)\n");
+    } else {
+        for t in &data.issues_found {
+            r.push_str(&format!(
+                "- {}{} {} ({}, {}){}\n",
+                epic_tag(t.item, &app.items),
+                issue_link_md(t.item),
+                clean_title(&t.item.title),
+                t.item.status.label(),
+                t.item.priority.as_deref().unwrap_or("--"),
+                if t.is_ot { " (OT)" } else { "" },
             ));
         }
     }
@@ -974,14 +1211,14 @@ pub fn daily_standup_md(app: &App) -> String {
         r.push_str("- (none)\n");
     } else {
         for t in &data.in_qa {
-            let num = issue_link_md(t.item);
-            let prio = t.item.priority.as_deref().unwrap_or("--");
             r.push_str(&format!(
-                "- Testing {} {} ({}, {})\n",
-                num,
-                t.item.title,
+                "- {} {}{} {} ({}, {})\n",
+                qa_verb(t.item),
+                epic_tag(t.item, &app.items),
+                issue_link_md(t.item),
+                clean_title(&t.item.title),
                 t.item.status.label(),
-                prio
+                t.item.priority.as_deref().unwrap_or("--"),
             ));
         }
     }
@@ -990,28 +1227,12 @@ pub fn daily_standup_md(app: &App) -> String {
     if !data.blocked.is_empty() {
         r.push_str("\n### Blockers\n");
         for t in &data.blocked {
-            let num = issue_link_md(t.item);
-            let ot = if t.is_ot { " (OT)" } else { "" };
-            r.push_str(&format!("- {} {} (Blocked){}\n", num, t.item.title, ot));
-        }
-    }
-
-    // Bug Found
-    r.push_str("\n### Bug Found\n");
-    if data.bugs_found.is_empty() {
-        r.push_str("- (none)\n");
-    } else {
-        for t in &data.bugs_found {
-            let num = issue_link_md(t.item);
-            let prio = t.item.priority.as_deref().unwrap_or("--");
-            let ot = if t.is_ot { " (OT)" } else { "" };
             r.push_str(&format!(
-                "- {} {} ({}, {}){}\n",
-                num,
-                t.item.title,
-                t.item.status.label(),
-                prio,
-                ot
+                "- {}{} {} (Blocked){}\n",
+                epic_tag(t.item, &app.items),
+                issue_link_md(t.item),
+                clean_title(&t.item.title),
+                if t.is_ot { " (OT)" } else { "" },
             ));
         }
     }
@@ -1028,23 +1249,58 @@ pub fn daily_standup_text(app: &App) -> String {
     r.push_str(&format!("QA: @{} | Sprint: {}\n\n", data.user, data.sprint));
     push_missing_history_warning(&mut r, data.missing_history, "");
 
-    // Yesterday
-    r.push_str("Yesterday:\n");
-    if data.yesterday.is_empty() {
+    // Yesterday - what was tested and passed
+    r.push_str("Yesterday - Tested & Verified:\n");
+    if data.tested.is_empty() {
         r.push_str("• (None)\n");
     } else {
-        for a in &data.yesterday {
-            let num = issue_num_text(a.item);
-            let prio = a.item.priority.as_deref().unwrap_or("--");
-            let ot = if a.is_ot { " (OT)" } else { "" };
+        for a in &data.tested {
             r.push_str(&format!(
-                "• {} {} ({}, {}) → {}{}\n",
-                num,
-                a.item.title,
+                "• {}{} {} ({}, {}) → {}{}\n",
+                epic_tag(a.item, &app.items),
+                issue_num_text(a.item),
+                clean_title(&a.item.title),
                 a.item.status.label(),
-                prio,
+                a.item.priority.as_deref().unwrap_or("--"),
                 a.kind.full_description(),
-                ot
+                if a.is_ot { " (OT)" } else { "" },
+            ));
+        }
+    }
+
+    // Yesterday - what was sent back to dev
+    r.push_str("\nYesterday - Failed:\n");
+    if data.failed.is_empty() {
+        r.push_str("• (None)\n");
+    } else {
+        for f in &data.failed {
+            r.push_str(&format!(
+                "• {}{} {} ({}, {}) → {}{}\n",
+                epic_tag(f.item, &app.items),
+                issue_num_text(f.item),
+                clean_title(&f.item.title),
+                f.item.status.label(),
+                f.item.priority.as_deref().unwrap_or("--"),
+                f.kind.full_description(),
+                if f.is_ot { " (OT)" } else { "" },
+            ));
+        }
+    }
+
+    // Yesterday - what was filed
+    r.push_str("\nYesterday - Issues found:\n");
+    if data.issues_found.is_empty() {
+        r.push_str("• (None)\n");
+    } else {
+        for t in &data.issues_found {
+            r.push_str(&format!(
+                "• {}{} {} ({}, {}){}\n",
+                epic_tag(t.item, &app.items),
+                issue_num_text(t.item),
+                clean_title(&t.item.title),
+                t.item.status.label(),
+                t.item.priority.as_deref().unwrap_or("--"),
+                if t.is_ot { " (OT)" } else { "" },
             ));
         }
     }
@@ -1055,14 +1311,14 @@ pub fn daily_standup_text(app: &App) -> String {
         r.push_str("• (None)\n");
     } else {
         for t in &data.in_qa {
-            let num = t.item.number.map(|n| format!("#{}", n)).unwrap_or_default();
-            let prio = t.item.priority.as_deref().unwrap_or("--");
             r.push_str(&format!(
-                "• Testing {} {} ({}, {})\n",
-                num,
-                t.item.title,
+                "• {} {}{} {} ({}, {})\n",
+                qa_verb(t.item),
+                epic_tag(t.item, &app.items),
+                issue_num_text(t.item),
+                clean_title(&t.item.title),
                 t.item.status.label(),
-                prio
+                t.item.priority.as_deref().unwrap_or("--"),
             ));
         }
     }
@@ -1071,28 +1327,12 @@ pub fn daily_standup_text(app: &App) -> String {
     if !data.blocked.is_empty() {
         r.push_str("\nBlockers:\n");
         for t in &data.blocked {
-            let num = issue_num_text(t.item);
-            let ot = if t.is_ot { " (OT)" } else { "" };
-            r.push_str(&format!("• {} {} (Blocked){}\n", num, t.item.title, ot));
-        }
-    }
-
-    // Bug Found
-    r.push_str("\nBug Found:\n");
-    if data.bugs_found.is_empty() {
-        r.push_str("• (None)\n");
-    } else {
-        for t in &data.bugs_found {
-            let num = issue_num_text(t.item);
-            let prio = t.item.priority.as_deref().unwrap_or("--");
-            let ot = if t.is_ot { " (OT)" } else { "" };
             r.push_str(&format!(
-                "• {} {} ({}, {}){}\n",
-                num,
-                t.item.title,
-                t.item.status.label(),
-                prio,
-                ot
+                "• {}{} {} (Blocked){}\n",
+                epic_tag(t.item, &app.items),
+                issue_num_text(t.item),
+                clean_title(&t.item.title),
+                if t.is_ot { " (OT)" } else { "" },
             ));
         }
     }
@@ -1114,23 +1354,58 @@ pub fn daily_standup_slack(app: &App) -> String {
     ));
     push_missing_history_warning(&mut r, data.missing_history, "");
 
-    // Yesterday
-    r.push_str("*Yesterday*\n");
-    if data.yesterday.is_empty() {
+    // Yesterday - what was tested and passed
+    r.push_str("*Yesterday - Tested & Verified*\n");
+    if data.tested.is_empty() {
         r.push_str("• (None)\n");
     } else {
-        for a in &data.yesterday {
-            let num = issue_link_slack(a.item, &app.config.owner);
-            let prio = a.item.priority.as_deref().unwrap_or("--");
-            let ot = if a.is_ot { " (OT)" } else { "" };
+        for a in &data.tested {
             r.push_str(&format!(
-                "• {} {} ({}, {}) → {}{}\n",
-                num,
+                "• {}{} {} ({}, {}) → {}{}\n",
+                epic_tag(a.item, &app.items),
+                issue_link_slack(a.item, &app.config.owner),
                 title_slack(a.item),
                 a.item.status.label(),
-                prio,
+                a.item.priority.as_deref().unwrap_or("--"),
                 a.kind.full_description(),
-                ot
+                if a.is_ot { " (OT)" } else { "" },
+            ));
+        }
+    }
+
+    // Yesterday - what was sent back to dev
+    r.push_str("\n*Yesterday - Failed*\n");
+    if data.failed.is_empty() {
+        r.push_str("• (None)\n");
+    } else {
+        for f in &data.failed {
+            r.push_str(&format!(
+                "• {}{} {} ({}, {}) → {}{}\n",
+                epic_tag(f.item, &app.items),
+                issue_link_slack(f.item, &app.config.owner),
+                title_slack(f.item),
+                f.item.status.label(),
+                f.item.priority.as_deref().unwrap_or("--"),
+                f.kind.full_description(),
+                if f.is_ot { " (OT)" } else { "" },
+            ));
+        }
+    }
+
+    // Yesterday - what was filed
+    r.push_str("\n*Yesterday - Issues found*\n");
+    if data.issues_found.is_empty() {
+        r.push_str("• (None)\n");
+    } else {
+        for t in &data.issues_found {
+            r.push_str(&format!(
+                "• {}{} {} ({}, {}){}\n",
+                epic_tag(t.item, &app.items),
+                issue_link_slack(t.item, &app.config.owner),
+                title_slack(t.item),
+                t.item.status.label(),
+                t.item.priority.as_deref().unwrap_or("--"),
+                if t.is_ot { " (OT)" } else { "" },
             ));
         }
     }
@@ -1141,14 +1416,14 @@ pub fn daily_standup_slack(app: &App) -> String {
         r.push_str("• (None)\n");
     } else {
         for t in &data.in_qa {
-            let num = issue_link_slack(t.item, &app.config.owner);
-            let prio = t.item.priority.as_deref().unwrap_or("--");
             r.push_str(&format!(
-                "• Testing {} {} ({}, {})\n",
-                num,
+                "• {} {}{} {} ({}, {})\n",
+                qa_verb(t.item),
+                epic_tag(t.item, &app.items),
+                issue_link_slack(t.item, &app.config.owner),
                 title_slack(t.item),
                 t.item.status.label(),
-                prio
+                t.item.priority.as_deref().unwrap_or("--"),
             ));
         }
     }
@@ -1157,33 +1432,12 @@ pub fn daily_standup_slack(app: &App) -> String {
     if !data.blocked.is_empty() {
         r.push_str("\n*Blockers*\n");
         for t in &data.blocked {
-            let num = issue_link_slack(t.item, &app.config.owner);
-            let ot = if t.is_ot { " (OT)" } else { "" };
             r.push_str(&format!(
-                "• {} {} (Blocked){}\n",
-                num,
+                "• {}{} {} (Blocked){}\n",
+                epic_tag(t.item, &app.items),
+                issue_link_slack(t.item, &app.config.owner),
                 title_slack(t.item),
-                ot
-            ));
-        }
-    }
-
-    // Bug Found
-    r.push_str("\n*Bugs found*\n");
-    if data.bugs_found.is_empty() {
-        r.push_str("• (None)\n");
-    } else {
-        for t in &data.bugs_found {
-            let num = issue_link_slack(t.item, &app.config.owner);
-            let prio = t.item.priority.as_deref().unwrap_or("--");
-            let ot = if t.is_ot { " (OT)" } else { "" };
-            r.push_str(&format!(
-                "• {} {} ({}, {}){}\n",
-                num,
-                title_slack(t.item),
-                t.item.status.label(),
-                prio,
-                ot
+                if t.is_ot { " (OT)" } else { "" },
             ));
         }
     }
@@ -1192,6 +1446,29 @@ pub fn daily_standup_slack(app: &App) -> String {
 }
 
 // ─── Sprint Report formatters ───────────────────────────────────────────────
+
+/// One line of the "By EPIC" section. `name` carries the format-specific epic
+/// link.
+fn epic_group_line(g: &EpicGroup, name: &str) -> String {
+    let mut s = format!("{} - {} tickets", name, g.tickets);
+    if g.bugs > 0 {
+        s.push_str(&format!(" ({} bugs)", g.bugs));
+    }
+    if g.in_qa > 0 {
+        s.push_str(&format!(" | in QA: {}", g.in_qa));
+    }
+    if g.tested > 0 {
+        if g.failed > 0 {
+            s.push_str(&format!(
+                " | tested: {} ({} passed, {} failed)",
+                g.tested, g.passed, g.failed
+            ));
+        } else {
+            s.push_str(&format!(" | tested: {} (all passed)", g.tested));
+        }
+    }
+    s
+}
 
 /// QA queue summary: "10 (4 to test + 2 bugs to verify + 4 waiting for deploy)".
 ///
@@ -1277,6 +1554,18 @@ pub fn sprint_report_md(app: &App) -> String {
         r.push_str(&format!("- Blocked: {}\n", data.blocked_count));
     }
 
+    // ── By EPIC ──
+    if !data.epics.is_empty() {
+        r.push_str("\n### By EPIC\n");
+        for g in &data.epics {
+            let name = match g.epic {
+                Some(e) => format!("{} {}", issue_link_md(e), epic_short_name(e)),
+                None => "No EPIC".to_string(),
+            };
+            r.push_str(&format!("- {}\n", epic_group_line(g, &name)));
+        }
+    }
+
     // ── Bugs ──
     let total_bugs = total_open_bugs(&data);
     if total_bugs > 0 {
@@ -1352,9 +1641,10 @@ pub fn sprint_report_md(app: &App) -> String {
             let num = issue_link_md(rt.item);
             let prio = rt.item.priority.as_deref().unwrap_or("--");
             r.push_str(&format!(
-                "- {} {} ({}, {}, failed {}×)\n",
+                "- {}{} {} ({}, {}, failed {}×)\n",
+                epic_tag(rt.item, &app.items),
                 num,
-                rt.item.title,
+                clean_title(&rt.item.title),
                 prio,
                 rt.item.status.label(),
                 rt.fail_count
@@ -1365,8 +1655,8 @@ pub fn sprint_report_md(app: &App) -> String {
     // Bugs waiting for dev
     if !data.bugs_for_dev.is_empty() {
         r.push_str("\n### Bugs Waiting for Dev\n");
-        r.push_str("| # | Title | Priority | Status | Assignee |\n");
-        r.push_str("|---|---|---|---|---|\n");
+        r.push_str("| # | Epic | Title | Priority | Status | Assignee |\n");
+        r.push_str("|---|---|---|---|---|---|\n");
         for bug in &data.bugs_for_dev {
             let num = bug.number.map(|n| format!("#{}", n)).unwrap_or_default();
             let prio = bug.priority.as_deref().unwrap_or("--");
@@ -1377,9 +1667,10 @@ pub fn sprint_report_md(app: &App) -> String {
                 .collect::<Vec<_>>()
                 .join(" ");
             r.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} |\n",
                 num,
-                bug.title,
+                epic_tag(bug, &app.items).trim(),
+                clean_title(&bug.title),
                 prio,
                 bug.status.label(),
                 assignee
@@ -1429,6 +1720,18 @@ pub fn sprint_report_text(app: &App) -> String {
     }
 
     // ── Bugs ──
+    // ── By EPIC ──
+    if !data.epics.is_empty() {
+        r.push_str("\nBy EPIC:\n");
+        for g in &data.epics {
+            let name = match g.epic {
+                Some(e) => format!("{} {}", issue_num_text(e), epic_short_name(e)),
+                None => "No EPIC".to_string(),
+            };
+            r.push_str(&format!("• {}\n", epic_group_line(g, &name)));
+        }
+    }
+
     let total_bugs = total_open_bugs(&data);
     if total_bugs > 0 {
         r.push_str(&format!("\nBugs ({} open):\n", total_bugs));
@@ -1500,9 +1803,10 @@ pub fn sprint_report_text(app: &App) -> String {
             let num = issue_num_text(rt.item);
             let prio = rt.item.priority.as_deref().unwrap_or("--");
             r.push_str(&format!(
-                "• {} {} ({}, {}, failed {}×)\n",
+                "• {}{} {} ({}, {}, failed {}×)\n",
+                epic_tag(rt.item, &app.items),
                 num,
-                rt.item.title,
+                clean_title(&rt.item.title),
                 prio,
                 rt.item.status.label(),
                 rt.fail_count
@@ -1523,9 +1827,10 @@ pub fn sprint_report_text(app: &App) -> String {
                 .collect::<Vec<_>>()
                 .join(" ");
             r.push_str(&format!(
-                "• {} {} | {} | {} | {}\n",
+                "• {}{} {} | {} | {} | {}\n",
+                epic_tag(bug, &app.items),
                 num,
-                bug.title,
+                clean_title(&bug.title),
                 prio,
                 bug.status.label(),
                 assignee
@@ -1575,6 +1880,22 @@ pub fn sprint_report_slack(app: &App) -> String {
     }
 
     // ── Bugs ──
+    // ── By EPIC ──
+    if !data.epics.is_empty() {
+        r.push_str("\n*By EPIC*\n");
+        for g in &data.epics {
+            let name = match g.epic {
+                Some(e) => format!(
+                    "{} {}",
+                    issue_link_slack(e, &app.config.owner),
+                    epic_short_name(e)
+                ),
+                None => "No EPIC".to_string(),
+            };
+            r.push_str(&format!("• {}\n", epic_group_line(g, &name)));
+        }
+    }
+
     let total_bugs = total_open_bugs(&data);
     if total_bugs > 0 {
         r.push_str(&format!("\n*Bugs* ({} open)\n", total_bugs));
@@ -1657,7 +1978,8 @@ pub fn sprint_report_slack(app: &App) -> String {
                 format!(" → {}", assignee_mentions.join(" "))
             };
             r.push_str(&format!(
-                "• {} {} ({}, {}, failed {}×){}\n",
+                "• {}{} {} ({}, {}, failed {}×){}\n",
+                epic_tag(rt.item, &app.items),
                 num,
                 title_slack(rt.item),
                 prio,
@@ -1685,7 +2007,8 @@ pub fn sprint_report_slack(app: &App) -> String {
                 assignee_mentions.join(" ")
             };
             r.push_str(&format!(
-                "• {} {} | {} | {} | {}\n",
+                "• {}{} {} | {} | {} | {}\n",
+                epic_tag(bug, &app.items),
                 num,
                 title_slack(bug),
                 prio,
@@ -2176,5 +2499,252 @@ mod tests {
             "Ready for Release",
             &Status::Blocked
         ));
+    }
+
+    #[test]
+    fn test_clean_title_puts_a_wrapped_title_back_on_one_line() {
+        assert_eq!(
+            clean_title("[BUG] Title:\nUnauthorised APIs are called "),
+            "[BUG] Title: Unauthorised APIs are called"
+        );
+    }
+
+    #[test]
+    fn test_is_epic_accepts_either_the_label_or_the_title_prefix() {
+        // The board uses both conventions, and some epics carry only one.
+        let labelled = Item {
+            title: "Dave project".into(),
+            labels: vec!["Epic".into()],
+            ..Default::default()
+        };
+        let prefixed = Item {
+            title: "[Epic] Dave project".into(),
+            ..Default::default()
+        };
+        let story = Item {
+            title: "US 13: Segments".into(),
+            labels: vec!["Story".into()],
+            ..Default::default()
+        };
+        assert!(is_epic(&labelled));
+        assert!(is_epic(&prefixed));
+        assert!(!is_epic(&story));
+    }
+
+    #[test]
+    fn test_epic_short_name_drops_the_prefix() {
+        let epic = Item {
+            title: "[Epic] Dave project".into(),
+            ..Default::default()
+        };
+        assert_eq!(epic_short_name(&epic), "Dave project");
+    }
+
+    #[test]
+    fn test_qa_verb_separates_testing_from_verifying() {
+        let task = Item {
+            title: "Support per-template repetition config".into(),
+            labels: vec!["Task".into()],
+            ..Default::default()
+        };
+        let unlabelled = Item {
+            title: "no label at all".into(),
+            ..Default::default()
+        };
+        let bug = Item {
+            title: "[BUG] Stripe form breaks".into(),
+            labels: vec!["Bug".into()],
+            ..Default::default()
+        };
+        // Feature work that merely carries the Enhancement label.
+        let dev_enhancement = Item {
+            title: "[Enhancement][BE] Refactor email handling".into(),
+            labels: vec!["Enhancement".into()],
+            ..Default::default()
+        };
+        // Raised by QA through the report form.
+        let qa_enhancement = Item {
+            title: "[ENHANCEMENT] Improve the empty state".into(),
+            labels: vec!["Enhancement".into()],
+            ..Default::default()
+        };
+
+        assert_eq!(qa_verb(&task), "Testing");
+        assert_eq!(qa_verb(&unlabelled), "Testing");
+        assert_eq!(qa_verb(&bug), "Verifying");
+        assert_eq!(
+            qa_verb(&dev_enhancement),
+            "Testing",
+            "the Enhancement label alone is feature work"
+        );
+        assert_eq!(qa_verb(&qa_enhancement), "Verifying");
+    }
+
+    #[test]
+    fn test_resolve_epic_walks_up_through_a_story() {
+        // ticket -> story -> epic. Sync fetches ONE parent level, so the epic
+        // is only reachable by re-reading the story from the board.
+        let items = vec![
+            Item {
+                number: Some(1),
+                title: "[Epic] Emails".into(),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+            Item {
+                number: Some(2),
+                title: "Revive invitation emails".into(),
+                labels: vec!["Story".into()],
+                parent_number: Some(1),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+            Item {
+                number: Some(3),
+                title: "ticket".into(),
+                parent_number: Some(2),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+        ];
+
+        let epic = resolve_epic(&items[2], &items).expect("epic found through the story");
+        assert_eq!(epic.number, Some(1));
+        assert_eq!(epic_tag(&items[2], &items), "[Emails] ");
+    }
+
+    #[test]
+    fn test_resolve_epic_ignores_the_same_number_in_another_repo() {
+        // The project spans repositories and issue numbers repeat across them,
+        // so a number-only match would file a ticket under a foreign epic.
+        let items = vec![
+            Item {
+                number: Some(1),
+                title: "[Epic] Epic in the API repo".into(),
+                repository: Some("org/api".into()),
+                ..Default::default()
+            },
+            Item {
+                number: Some(9),
+                title: "ticket".into(),
+                parent_number: Some(1),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+        ];
+
+        assert!(resolve_epic(&items[1], &items).is_none());
+        assert_eq!(epic_tag(&items[1], &items), "[no epic] ");
+    }
+
+    #[test]
+    fn test_a_failed_ticket_is_reported_apart_from_the_passes() {
+        use crate::app::App;
+        let yesterday = Utc::now() - chrono::Duration::days(1);
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![
+            Item {
+                id: "sent-back".into(),
+                number: Some(1),
+                title: "failed on STG".into(),
+                status: Status::InProgress,
+                assignees: vec!["qa".into()],
+                status_history: Some(vec![status_evt("In QA", "In Progress", yesterday)]),
+                ..Default::default()
+            },
+            Item {
+                id: "passed".into(),
+                number: Some(2),
+                title: "verified".into(),
+                status: Status::TechComplete,
+                assignees: vec!["qa".into()],
+                status_history: Some(vec![status_evt("In QA", "Tech Complete", yesterday)]),
+                ..Default::default()
+            },
+        ];
+
+        let data = collect_daily_standup(&app);
+        assert_eq!(data.failed.len(), 1, "the rejection gets its own section");
+        assert_eq!(data.failed[0].item.id, "sent-back");
+        assert_eq!(data.tested.len(), 1, "and is not counted among the passes");
+        assert_eq!(data.tested[0].item.id, "passed");
+    }
+
+    #[test]
+    fn test_issues_found_takes_qa_enhancements_but_not_dev_ones() {
+        use crate::app::App;
+        let yesterday = Utc::now() - chrono::Duration::days(1);
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![
+            Item {
+                id: "qa-enh".into(),
+                number: Some(1),
+                title: "[ENHANCEMENT] Improve the empty state".into(),
+                status: Status::ReadyForDev,
+                labels: vec!["Enhancement".into()],
+                assignees: vec!["qa".into()],
+                created_at: Some(yesterday),
+                ..Default::default()
+            },
+            Item {
+                id: "dev-enh".into(),
+                number: Some(2),
+                title: "[Enhancement][BE] Refactor email handling".into(),
+                status: Status::ReadyForDev,
+                labels: vec!["Enhancement".into()],
+                assignees: vec!["qa".into()],
+                created_at: Some(yesterday),
+                ..Default::default()
+            },
+        ];
+
+        let data = collect_daily_standup(&app);
+        let found: Vec<&str> = data
+            .issues_found
+            .iter()
+            .map(|t| t.item.id.as_str())
+            .collect();
+        assert_eq!(
+            found,
+            ["qa-enh"],
+            "only the enhancement QA raised counts as an issue found"
+        );
+    }
+
+    #[test]
+    fn test_a_filed_bug_is_reported_once_not_twice() {
+        // Filing a bug also shows up as a status change to Ready for Dev, so
+        // the ticket used to appear both as yesterday's "work" and as a bug.
+        use crate::app::App;
+        let yesterday = Utc::now() - chrono::Duration::days(1);
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![Item {
+            id: "bug".into(),
+            number: Some(1),
+            title: "filed by the QA".into(),
+            status: Status::ReadyForDev,
+            labels: vec!["Bug".into()],
+            assignees: vec!["qa".into()],
+            created_at: Some(yesterday),
+            status_history: Some(vec![status_evt("", "Ready for Dev", yesterday)]),
+            ..Default::default()
+        }];
+
+        let data = collect_daily_standup(&app);
+        assert_eq!(data.issues_found.len(), 1, "belongs in Issues found");
+        assert!(
+            data.tested.is_empty(),
+            "filing a bug is not a test result, got {:?}",
+            data.tested
+                .iter()
+                .map(|a| a.kind.full_description())
+                .collect::<Vec<_>>()
+        );
     }
 }
