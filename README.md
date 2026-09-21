@@ -227,13 +227,17 @@ Slack.
 
 **Daily standup** covers what you did on the previous working day, from the
 ticket timeline rather than from memory. On a Monday it reaches back to Friday.
-Work outside the paid shifts is tagged as overtime.
+Work outside the paid shifts is tagged as overtime. A move you reverse yourself
+within half an hour is treated as a misclick and left out. Every line is
+tagged with the ticket's EPIC, or with the root ticket it hangs under.
 
-**Sprint report** covers the pipeline, the open bugs by bucket, and QA metrics.
-The metrics come from the latest QA verdict on each ticket, including
-label-only passes, so `passed + failed = tested` always holds. Tickets whose
-timeline has not been fetched yet are reported as such rather than quietly
-dropped from the totals.
+**Sprint report** covers the pipeline, the open bugs by bucket, QA metrics,
+and a rollup by EPIC or root ticket. Done means Tech Complete, Ready for
+Release or Done. The metrics come from the latest QA verdict on each ticket
+since the sprint's first day, including label-only passes, so
+`passed + failed = tested` always holds and a carried-over ticket's verdict
+from a previous sprint does not count. Tickets whose timeline has not been
+fetched yet are reported as such rather than quietly dropped from the totals.
 
 | Key | Report |
 | --- | --- |

@@ -51,7 +51,8 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let total = items.len();
-    let done = items.iter().filter(|i| i.status == Status::Done).count();
+    // Tech Complete is done as far as the sprint goes (see Status::is_completed).
+    let done = items.iter().filter(|i| i.status.is_completed()).count();
     let in_qa = items.iter().filter(|i| i.status == Status::InQA).count();
     let in_qa_dev = items.iter().filter(|i| i.status == Status::InQADev).count();
     let in_uat = items.iter().filter(|i| i.status == Status::InUAT).count();
@@ -211,24 +212,8 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|i| i.labels.iter().any(|l| l.to_lowercase().contains("bug")))
         .collect();
-    let bug_open = bugs
-        .iter()
-        .filter(|i| {
-            !matches!(
-                i.status,
-                Status::Done | Status::TechComplete | Status::ReadyForRelease
-            )
-        })
-        .count();
-    let bug_done = bugs
-        .iter()
-        .filter(|i| {
-            matches!(
-                i.status,
-                Status::Done | Status::TechComplete | Status::ReadyForRelease
-            )
-        })
-        .count();
+    let bug_open = bugs.iter().filter(|i| !i.status.is_completed()).count();
+    let bug_done = bugs.iter().filter(|i| i.status.is_completed()).count();
 
     lines.push(section_header("Bug Tracker", sep_w));
     lines.push(Line::from(vec![
@@ -278,10 +263,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|i| matches!(i.status, Status::InQA | Status::InQADev | Status::InUAT))
         .count();
-    let my_done = my_items
-        .iter()
-        .filter(|i| i.status == Status::Done || i.status == Status::TechComplete)
-        .count();
+    let my_done = my_items.iter().filter(|i| i.status.is_completed()).count();
     let my_bugs = my_items
         .iter()
         .filter(|i| i.labels.iter().any(|l| l.to_lowercase().contains("bug")))
@@ -350,14 +332,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
                 .filter(|i| i.stack.as_deref() == Some(stack.as_str()))
                 .collect();
             let s_total = s_items.len();
-            let s_done = s_items
-                .iter()
-                .filter(|i| {
-                    i.status == Status::Done
-                        || i.status == Status::TechComplete
-                        || i.status == Status::ReadyForRelease
-                })
-                .count();
+            let s_done = s_items.iter().filter(|i| i.status.is_completed()).count();
             let s_qa = s_items
                 .iter()
                 .filter(|i| matches!(i.status, Status::InQA | Status::InQADev | Status::InUAT))

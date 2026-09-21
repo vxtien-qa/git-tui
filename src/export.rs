@@ -1,7 +1,7 @@
 use crate::app::App;
 use crate::cache::Cache;
 use crate::models::status::Status;
-use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
 
 // ─── Time helpers ───────────────────────────────────────────────────────────
 
@@ -11,11 +11,16 @@ use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveTime, Utc};
 /// that window counts as OT, which is the team's policy.
 const SHIFTS: [((u32, u32), (u32, u32)); 2] = [((7, 30), (11, 30)), ((13, 0), (17, 0))];
 
+/// The configured timezone. A bad offset falls back to UTC instead of
+/// panicking in the middle of a report.
+fn fixed_offset(offset_hours: i32) -> FixedOffset {
+    FixedOffset::east_opt(offset_hours * 3600).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap())
+}
+
 /// Check if a timestamp is Overtime (OT) in the configured timezone.
 /// OT = weekends, or weekdays outside the paid shifts (lunch break included).
 fn is_ot(dt_utc: DateTime<Utc>, offset_hours: i32) -> bool {
-    let tz_offset = FixedOffset::east_opt(offset_hours * 3600)
-        .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    let tz_offset = fixed_offset(offset_hours);
     let dt_local = dt_utc.with_timezone(&tz_offset);
 
     if dt_local.weekday() == chrono::Weekday::Sat || dt_local.weekday() == chrono::Weekday::Sun {
@@ -36,7 +41,7 @@ fn is_ot(dt_utc: DateTime<Utc>, offset_hours: i32) -> bool {
 /// On Monday: includes Friday, Saturday, Sunday (so Friday's work shows up).
 /// On other weekdays: includes only yesterday.
 fn is_previous_workday(dt_utc: DateTime<Utc>, offset_hours: i32) -> bool {
-    let tz_offset = FixedOffset::east_opt(offset_hours * 3600).unwrap();
+    let tz_offset = fixed_offset(offset_hours);
     let now_local = Utc::now().with_timezone(&tz_offset);
     let dt_local = dt_utc.with_timezone(&tz_offset);
 
@@ -61,8 +66,7 @@ fn is_previous_workday(dt_utc: DateTime<Utc>, offset_hours: i32) -> bool {
 /// classifies events by this offset, so the header must agree with it (the
 /// machine-local clock can differ, e.g. a laptop on travel).
 fn report_date(offset_hours: i32) -> String {
-    let tz_offset = FixedOffset::east_opt(offset_hours * 3600)
-        .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    let tz_offset = fixed_offset(offset_hours);
     Utc::now()
         .with_timezone(&tz_offset)
         .format("%b %d, %Y")
@@ -71,7 +75,7 @@ fn report_date(offset_hours: i32) -> String {
 
 /// Check if a timestamp is Today in the configured timezone.
 fn is_today(dt_utc: DateTime<Utc>, offset_hours: i32) -> bool {
-    let tz_offset = FixedOffset::east_opt(offset_hours * 3600).unwrap();
+    let tz_offset = fixed_offset(offset_hours);
     let now_local = Utc::now().with_timezone(&tz_offset);
     let dt_local = dt_utc.with_timezone(&tz_offset);
 
@@ -111,8 +115,9 @@ enum ActionKind {
     MovedToBacklog,
     /// Comment only, no status change by user
     Commented,
-    /// Other status change by user (catch-all)
-    WorkedOn(String),
+    /// Any other status change by the user, reported as the move it was.
+    /// `from` is empty when the ticket had no status before (just created).
+    WorkedOn { from: String, to: String },
 }
 
 impl ActionKind {
@@ -128,17 +133,16 @@ impl ActionKind {
             Self::TestComplete => "Testing complete",
             Self::Blocked => "Blocked, needs further action",
             Self::MovedToBacklog => "Moved to Backlog, will handle later",
-            Self::Commented => "Reviewed & commented, needs confirmation",
-            Self::WorkedOn(_) => "Worked on ticket",
+            Self::Commented => "Reviewed & commented",
+            Self::WorkedOn { .. } => "Moved",
         }
     }
 
     /// Full description.
     fn full_description(&self) -> String {
         match self {
-            Self::WorkedOn(status) if !status.is_empty() => {
-                format!("Worked on ticket ({})", status)
-            }
+            Self::WorkedOn { from, to } if from.is_empty() => format!("Moved to {}", to),
+            Self::WorkedOn { from, to } => format!("Moved {} → {}", from, to),
             other => other.description().to_string(),
         }
     }
@@ -164,7 +168,7 @@ impl ActionKind {
             | Self::FailedOnDev
             | Self::Blocked
             | Self::MovedToBacklog => 3,
-            Self::WorkedOn(_) => 2,
+            Self::WorkedOn { .. } => 2,
             Self::Commented => 1,
         }
     }
@@ -181,7 +185,7 @@ impl ActionKind {
             Self::TestComplete => 6,
             Self::Blocked => 7,
             Self::MovedToBacklog => 8,
-            Self::WorkedOn(_) => 9,
+            Self::WorkedOn { .. } => 9,
             Self::Commented => 10,
         }
     }
@@ -217,14 +221,15 @@ struct DailyStandupData<'a> {
     missing_history: usize,
 }
 
-/// Per-EPIC rollup for a sprint: which epic the sprint's tickets sit under,
-/// and how QA is doing inside each one.
+/// Per-EPIC rollup for a sprint: what the sprint's tickets sit under, and
+/// how QA is doing inside each group.
 struct EpicGroup<'a> {
-    /// The epic issue, or `None` for tickets with no epic above them.
-    epic: Option<&'a Item>,
+    /// The top of the tickets' sub-issue chain.
+    root: Root<'a>,
     tickets: usize,
     bugs: usize,
     in_qa: usize,
+    in_uat: usize,
     tested: usize,
     passed: usize,
     failed: usize,
@@ -238,9 +243,14 @@ struct SprintReportData<'a> {
     /// Sprint items with NO timeline data available - QA metrics may be
     /// undercounted while these are still being fetched.
     missing_history: usize,
+    /// First day of the sprint when the QA metrics are scoped to it.
+    metrics_since: Option<NaiveDate>,
     total: usize,
+    /// Completed tickets: Tech Complete, Ready for Release and Done.
     done_count: usize,
     done_pct: f64,
+    /// The Done column alone, for the split in the Done line.
+    done_column_count: usize,
     // ─── Pipeline groups (add up to total) ───
     not_started_count: usize,
     in_dev_pipeline: usize,
@@ -304,12 +314,23 @@ fn keep_latest(
 /// Complete. That biased the pass rate downward by construction and hid two
 /// thirds of the QA work done in a sprint.
 ///
-/// Returns `None` when the ticket has no QA verdict yet (never tested, or
-/// currently sitting in a QA column awaiting a first verdict).
-fn latest_qa_verdict(tl: &ItemTimeline) -> Option<(QaVerdict, DateTime<Utc>)> {
+/// `since` narrows the verdicts to a window - the sprint report passes the
+/// sprint's first day, so a carry-over passed on Dev weeks earlier and never
+/// deployed is not counted as this sprint's testing.
+///
+/// Returns `None` when the ticket has no QA verdict (in the window): never
+/// tested, or sitting in a QA column awaiting a first verdict.
+fn latest_qa_verdict(
+    tl: &ItemTimeline,
+    since: Option<DateTime<Utc>>,
+) -> Option<(QaVerdict, DateTime<Utc>)> {
+    let in_window = |at: DateTime<Utc>| since.is_none_or(|s| at >= s);
     let mut best: Option<(QaVerdict, DateTime<Utc>)> = None;
 
     for e in &tl.status_events {
+        if !in_window(e.created_at) {
+            continue;
+        }
         let prev = e.previous_status.as_deref().unwrap_or("").to_lowercase();
         let curr = e.status.as_deref().unwrap_or("").to_lowercase();
         // Only transitions OUT of a QA column are QA verdicts. Without this a
@@ -328,6 +349,9 @@ fn latest_qa_verdict(tl: &ItemTimeline) -> Option<(QaVerdict, DateTime<Utc>)> {
     }
 
     for l in &tl.label_events {
+        if !in_window(l.created_at) {
+            continue;
+        }
         if App::label_eq(&l.label, "Ready-for-Staging") || App::label_eq(&l.label, "Ready-for-UAT")
         {
             keep_latest(&mut best, QaVerdict::Passed, l.created_at);
@@ -371,16 +395,19 @@ fn classify_status_change(previous: Option<&str>, current: Option<&str>) -> Opti
             return Some(ActionKind::FailedOnUat);
         }
         // In Progress from other columns - could be user, show as generic
-        return Some(ActionKind::WorkedOn(curr.to_string()));
+        return Some(moved(prev, curr));
     }
 
-    // QA verifies → Tech Complete or Ready for Release
-    if curr_lower.contains("tech complete") || curr_lower.contains("ready for release") {
+    // A verdict is a move OUT of a QA column. The QA also moves tickets Ready
+    // for Dev -> Tech Complete (delivered under another ticket, say) and Tech
+    // Complete -> Ready for Release (the release step); neither is "verified",
+    // and the sprint report already refuses to count them as tested.
+    let from_qa = prev_lower.contains("in qa") || prev_lower.contains("in uat");
+    if from_qa && (curr_lower.contains("tech complete") || curr_lower.contains("ready for release"))
+    {
         return Some(ActionKind::VerifiedForRelease);
     }
-
-    // QA completes testing → Done
-    if curr_lower == "done" {
+    if from_qa && curr_lower == "done" {
         return Some(ActionKind::TestComplete);
     }
 
@@ -394,8 +421,15 @@ fn classify_status_change(previous: Option<&str>, current: Option<&str>) -> Opti
         return Some(ActionKind::MovedToBacklog);
     }
 
-    // Everything else done by user - show as generic
-    Some(ActionKind::WorkedOn(curr.to_string()))
+    // Everything else done by user - show as the move it was
+    Some(moved(prev, curr))
+}
+
+fn moved(prev: &str, curr: &str) -> ActionKind {
+    ActionKind::WorkedOn {
+        from: prev.to_string(),
+        to: curr.to_string(),
+    }
 }
 
 // ─── Data collection ────────────────────────────────────────────────────────
@@ -431,96 +465,80 @@ fn collect_daily_standup(app: &App) -> DailyStandupData<'_> {
     // Track items already added (by id) to avoid duplicates
     let mut seen_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-    let sprint_items: Vec<_> = app
-        .items
-        .iter()
-        .filter(|i| {
-            app.board_sprint_filter.is_none()
-                || i.sprint.as_deref() == app.board_sprint_filter.as_deref()
-        })
-        .collect();
+    let sprint_filter_matches = |i: &Item| {
+        app.board_sprint_filter.is_none()
+            || i.sprint.as_deref() == app.board_sprint_filter.as_deref()
+    };
 
     let mut missing_history = 0usize;
 
-    for item in &sprint_items {
+    // Every ticket the user touched counts, not only the sprint's: on day one
+    // of a sprint, Friday's Tech Complete tickets still sit in the previous
+    // sprint, and a sprint-scoped scan dropped them from Monday's standup.
+    // Off-sprint tickets are read from memory only (the sync fetches a
+    // timeline for every active ticket); the disk cache is for the sprint's
+    // own, and only those count as missing.
+    for item in &app.items {
+        let in_sprint = sprint_filter_matches(item);
+        if !in_sprint && item.status_history.is_none() {
+            continue;
+        }
         // Load timeline data: prefer in-memory, fallback to cache
         let tl = load_timeline_for_item(item, &timeline_cache);
         if tl.missing {
-            missing_history += 1;
+            if in_sprint {
+                missing_history += 1;
+            }
+            continue;
         }
         let status_events = &tl.status_events;
         let comment_events = &tl.comment_events;
 
-        // 1. Check status changes made BY current user yesterday
-        let mut best_action: Option<(ActionKind, bool)> = None;
-
+        // 1. Status changes and label passes made BY the current user
+        // yesterday, judged together. Pass Dev / Pass STG are LABEL-ONLY
+        // actions (LabeledEvent), and consulting them only when no status
+        // event matched reported a ticket failed at 17:12 and passed at 17:16
+        // as "Failed on STG". The most significant action wins; among equals,
+        // the latest. OT sticks: any OT event on the ticket keeps the flag.
+        let mut candidates: Vec<(DateTime<Utc>, ActionKind)> = Vec::new();
+        let mut any_ot = false;
         for evt in status_events {
             // Only events explicitly by the current user. (An actor-less
             // fallback used to attribute a co-assigned DEV's move to the QA.)
             let actor_match = evt.actor.as_deref().map(|a| a == user).unwrap_or(false);
-            if !actor_match {
+            if !actor_match || !is_previous_workday(evt.created_at, tz) {
                 continue;
             }
-            if !is_previous_workday(evt.created_at, tz) {
+            // None = definitively not a QA action (a move INTO a QA column).
+            let Some(kind) =
+                classify_status_change(evt.previous_status.as_deref(), evt.status.as_deref())
+            else {
                 continue;
-            }
-
-            let ot_flag = is_ot(evt.created_at, tz);
-            let kind =
-                classify_status_change(evt.previous_status.as_deref(), evt.status.as_deref());
-
-            // Skip non-QA actions (dev moving ticket to InQA, etc.)
-            let kind = match kind {
-                Some(k) => k,
-                None => continue,
             };
-
-            // Keep the most recent significant action (highest significance number wins)
-            match &best_action {
-                Some((existing, prev_ot)) if kind.significance() >= existing.significance() => {
-                    // OT sticks: any OT event on the ticket keeps the flag.
-                    let ot = ot_flag || *prev_ot;
-                    best_action = Some((kind, ot));
-                }
-                None => {
-                    best_action = Some((kind, ot_flag));
-                }
-                _ => {
-                    // Keep OT flag if any event is OT
-                    if ot_flag {
-                        if let Some((_, ref mut existing_ot)) = best_action {
-                            *existing_ot = true;
-                        }
-                    }
-                }
-            }
+            any_ot |= is_ot(evt.created_at, tz);
+            candidates.push((evt.created_at, kind));
         }
-
-        // 2. Label-based passes: Pass Dev / Pass STG are LABEL-ONLY actions.
-        // Detected from LabeledEvent timeline data - label added yesterday by
-        // the current user. (The old inference from current labels both missed
-        // clean passes and re-reported week-old ones.)
-        if best_action.is_none() {
-            for lev in &tl.label_events {
-                let actor_match = lev.actor.as_deref().map(|a| a == user).unwrap_or(false);
-                if !actor_match || !is_previous_workday(lev.created_at, tz) {
-                    continue;
-                }
-                let kind = if App::label_eq(&lev.label, "Ready-for-Staging") {
-                    Some(ActionKind::PassedDev)
-                } else if App::label_eq(&lev.label, "Ready-for-UAT") {
-                    Some(ActionKind::PassedStg)
-                } else {
-                    None
-                };
-                if let Some(kind) = kind {
-                    best_action = Some((kind, is_ot(lev.created_at, tz)));
-                    break;
-                }
+        for lev in &tl.label_events {
+            let actor_match = lev.actor.as_deref().map(|a| a == user).unwrap_or(false);
+            if !actor_match || !is_previous_workday(lev.created_at, tz) {
+                continue;
             }
+            let kind = if App::label_eq(&lev.label, "Ready-for-Staging") {
+                ActionKind::PassedDev
+            } else if App::label_eq(&lev.label, "Ready-for-UAT") {
+                ActionKind::PassedStg
+            } else {
+                continue;
+            };
+            any_ot |= is_ot(lev.created_at, tz);
+            candidates.push((lev.created_at, kind));
         }
+        let mut best_action: Option<(ActionKind, bool)> = candidates
+            .into_iter()
+            .max_by_key(|(at, kind)| (kind.significance(), *at))
+            .map(|(_, kind)| (kind, any_ot));
 
-        // 3. If no status change by user, check for comments by user yesterday
+        // 2. If no status change by user, check for comments by user yesterday
         if best_action.is_none() {
             for cev in comment_events {
                 let author_match = cev.author.as_deref().map(|a| a == user).unwrap_or(false);
@@ -568,9 +586,8 @@ fn collect_daily_standup(app: &App) -> DailyStandupData<'_> {
         if !created_recently {
             continue;
         }
-        // Heuristic: user is in assignees → likely the reporter
-        let user_involved = item.assignees.iter().any(|a| a == &user);
-        if user_involved {
+        let tl = load_timeline_for_item(item, &timeline_cache);
+        if filed_by_user(item, &tl, &user) {
             let ot_flag = item.created_at.map(|dt| is_ot(dt, tz)).unwrap_or(false);
             issues_found.push(TaggedItem {
                 item,
@@ -642,6 +659,82 @@ fn collect_daily_standup(app: &App) -> DailyStandupData<'_> {
     }
 }
 
+/// Whether the current user filed this issue.
+///
+/// The board carries no author, so it is read from the timeline: the report
+/// form (and a GitHub issue template) creates the issue, labels it and gives
+/// it its first status as the author, within moments of creation. Being an
+/// assignee is not filing - the QA assigns a bug to the developers, and a
+/// developer may assign one to the QA - so that heuristic only remains for
+/// tickets whose timeline has not been fetched yet.
+fn filed_by_user(item: &Item, tl: &ItemTimeline, user: &str) -> bool {
+    if tl.missing {
+        return item.assignees.iter().any(|a| a == user);
+    }
+    let by_user = |actor: Option<&str>| actor == Some(user);
+    let at_creation = |at: DateTime<Utc>| {
+        item.created_at
+            .map(|c| (at - c).num_minutes().abs() <= 5)
+            .unwrap_or(true)
+    };
+    // The first status the ticket ever got (nothing before it).
+    let first_status = tl.status_events.iter().find(|e| {
+        e.previous_status
+            .as_deref()
+            .is_none_or(|p| p.trim().is_empty())
+    });
+    if first_status
+        .map(|e| by_user(e.actor.as_deref()) && at_creation(e.created_at))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // Or the type label, added at creation.
+    tl.label_events.iter().any(|l| {
+        (App::label_eq(&l.label, "Bug") || App::label_eq(&l.label, "Enhancement"))
+            && by_user(l.actor.as_deref())
+            && at_creation(l.created_at)
+    })
+}
+
+/// A move that the same person reverses within this many minutes is an undo,
+/// not two actions.
+///
+/// #3844, Sprint 29: the QA moved it In QA - Dev -> In Progress at 11:11 and
+/// straight back at 11:17 - a misclick - and the standup reported a failure
+/// while the sprint report counted "failed 2×". A reversal by someone else
+/// (a developer returning a one-line fix) is two real actions and stays.
+const UNDO_WINDOW_MINUTES: i64 = 30;
+
+/// Drop every move and the same actor's prompt reversal of it.
+fn without_undone_moves(
+    mut events: Vec<crate::gh::timeline::StatusChangedEvent>,
+) -> Vec<crate::gh::timeline::StatusChangedEvent> {
+    events.sort_by_key(|e| e.created_at);
+    let mut undone = vec![false; events.len()];
+    let mut i = 0;
+    while i + 1 < events.len() {
+        let (a, b) = (&events[i], &events[i + 1]);
+        let same_actor = a.actor.is_some() && a.actor == b.actor;
+        let reverses =
+            b.status.is_some() && b.status == a.previous_status && b.previous_status == a.status;
+        let quick = b.created_at - a.created_at <= Duration::minutes(UNDO_WINDOW_MINUTES);
+        if same_actor && reverses && quick {
+            undone[i] = true;
+            undone[i + 1] = true;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    events
+        .into_iter()
+        .zip(undone)
+        .filter(|(_, u)| !u)
+        .map(|(e, _)| e)
+        .collect()
+}
+
 /// Timeline events for one item, plus whether any data was available at all.
 struct ItemTimeline {
     status_events: Vec<crate::gh::timeline::StatusChangedEvent>,
@@ -657,7 +750,7 @@ struct ItemTimeline {
 fn load_timeline_for_item(item: &Item, timeline_cache: &Cache) -> ItemTimeline {
     if let Some(ref history) = item.status_history {
         return ItemTimeline {
-            status_events: history.clone(),
+            status_events: without_undone_moves(history.clone()),
             comment_events: item.comment_history.clone().unwrap_or_default(),
             label_events: item.label_history.clone().unwrap_or_default(),
             missing: false,
@@ -669,7 +762,7 @@ fn load_timeline_for_item(item: &Item, timeline_cache: &Cache) -> ItemTimeline {
             timeline_cache.get_with_freshness::<crate::gh::timeline::TimelineData>(&cache_key)
         {
             return ItemTimeline {
-                status_events: td.status_changes,
+                status_events: without_undone_moves(td.status_changes),
                 comment_events: td.comments,
                 label_events: td.labels,
                 missing: false,
@@ -697,6 +790,21 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
 
     let timeline_cache = Cache::new(1800);
 
+    // QA metrics are THIS sprint's work. 12 of Sprint 29's 39 "tested" were
+    // verdicts from before the sprint began - carry-overs passed on Dev in
+    // August and never deployed. Without iteration dates (no sprint filter,
+    // or a board that carries none) every verdict counts, as before.
+    let metrics_since: Option<NaiveDate> = app
+        .board_sprint_filter
+        .as_deref()
+        .and_then(|s| app.sprint_start_date(s));
+    let since_utc: Option<DateTime<Utc>> = metrics_since.and_then(|d| {
+        fixed_offset(tz)
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+            .single()
+            .map(|dt| dt.with_timezone(&Utc))
+    });
+
     let items: Vec<_> = app
         .items
         .iter()
@@ -707,10 +815,10 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
         .collect();
 
     let total = items.len();
-    let done_count = items
-        .iter()
-        .filter(|i| matches!(i.status, Status::Done))
-        .count();
+    // Tech Complete is done as far as the sprint goes - the release note
+    // ships it - so it counts, with Ready for Release, alongside Done.
+    let done_count = items.iter().filter(|i| i.status.is_completed()).count();
+    let done_column_count = items.iter().filter(|i| i.status == Status::Done).count();
     let done_pct = if total > 0 {
         done_count as f64 * 100.0 / total as f64
     } else {
@@ -730,7 +838,7 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
     let mut failed_count = 0usize;
     let mut retest_items: Vec<RetestInfo> = Vec::new();
     let mut missing_history = 0usize;
-    let mut epic_groups: std::collections::HashMap<Option<u32>, EpicGroup> =
+    let mut epic_groups: std::collections::HashMap<String, EpicGroup> =
         std::collections::HashMap::new();
 
     for item in &items {
@@ -739,34 +847,43 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
             missing_history += 1;
         }
         let has_history = !(tl.status_events.is_empty() && tl.label_events.is_empty());
-        let verdict = if has_history {
-            latest_qa_verdict(&tl)
+        // The sprint's verdict drives the QA metrics; the all-time one says
+        // where the ticket stands today, for the retest list.
+        let (verdict, verdict_all) = if has_history {
+            (
+                latest_qa_verdict(&tl, since_utc),
+                latest_qa_verdict(&tl, None),
+            )
         } else {
-            None
+            (None, None)
         };
 
         // ─── Per-EPIC rollup ───
         //
         // Counted for EVERY sprint ticket, including those with no timeline
         // yet: a group's ticket count is a board fact, not a QA metric.
-        let epic = resolve_epic(item, &app.items).filter(|e| e.number.is_some());
-        let group = epic_groups
-            .entry(epic.and_then(|e| e.number))
-            .or_insert_with(|| EpicGroup {
-                epic,
-                tickets: 0,
-                bugs: 0,
-                in_qa: 0,
-                tested: 0,
-                passed: 0,
-                failed: 0,
-            });
+        let root = resolve_root(item, &app.items);
+        let group = epic_groups.entry(root.key()).or_insert_with(|| EpicGroup {
+            root,
+            tickets: 0,
+            bugs: 0,
+            in_qa: 0,
+            in_uat: 0,
+            tested: 0,
+            passed: 0,
+            failed: 0,
+        });
         group.tickets += 1;
         if item.labels.iter().any(|l| l.to_lowercase().contains("bug")) {
             group.bugs += 1;
         }
-        if matches!(item.status, Status::InQA | Status::InQADev | Status::InUAT) {
+        // Same definition as the Sprint Overview's "In QA" line, so the epic
+        // figures add up to it; In UAT is its own regression stage there too.
+        if matches!(item.status, Status::InQA | Status::InQADev) {
             group.in_qa += 1;
+        }
+        if item.status == Status::InUAT {
+            group.in_uat += 1;
         }
         match verdict {
             Some((QaVerdict::Passed, _)) => {
@@ -828,7 +945,7 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
             retest_items.push(RetestInfo {
                 item,
                 fail_count,
-                currently_failed: matches!(verdict, Some((QaVerdict::Failed, _))),
+                currently_failed: matches!(verdict_all, Some((QaVerdict::Failed, _))),
             });
         }
     }
@@ -836,11 +953,11 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
     // Sort retested items by fail count descending
     retest_items.sort_by_key(|a| std::cmp::Reverse(a.fail_count));
 
-    // Biggest epic first, and "no epic" last - it is a catch-all bucket
-    // (loose tickets plus everything hanging off a story or a sprint task),
-    // not a group anyone owns.
+    // Epics first, then the other roots (a sprint bucket task, a story whose
+    // epic is not on the board), biggest first; tickets with no parent at all
+    // last - that bucket is nobody's.
     let mut epics: Vec<EpicGroup> = epic_groups.into_values().collect();
-    epics.sort_by_key(|g| (g.epic.is_none(), std::cmp::Reverse(g.tickets)));
+    epics.sort_by_key(|g| (g.root.rank(), std::cmp::Reverse(g.tickets)));
 
     // ─── Pipeline-grouped counts (add up to total) ───
     let not_started_count = items
@@ -934,9 +1051,11 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
         user,
         date,
         missing_history,
+        metrics_since,
         total,
         done_count,
         done_pct,
+        done_column_count,
         not_started_count,
         in_dev_pipeline,
         in_qa_pipeline,
@@ -1045,7 +1164,12 @@ const MAX_PARENT_HOPS: usize = 4;
 
 /// Epic name without its `[Epic]` prefix, short enough for a report line.
 fn epic_short_name(item: &Item) -> String {
-    let title = clean_title(&item.title);
+    short_root_name(&item.title)
+}
+
+/// A root ticket's title without an `[Epic]` prefix, cut to fit a report line.
+fn short_root_name(raw: &str) -> String {
+    let title = clean_title(raw);
     let name = title
         .strip_prefix("[Epic]")
         .or_else(|| title.strip_prefix("[EPIC]"))
@@ -1061,29 +1185,121 @@ fn epic_short_name(item: &Item) -> String {
     }
 }
 
-/// The EPIC an item belongs to, found by walking up the sub-issue chain.
+/// The top of a ticket's sub-issue chain.
 ///
-/// Sync fetches only ONE parent level (`parent_number`), so the rest of the
-/// chain is rebuilt from the board itself: the parent is looked up among the
-/// loaded items and its own parent read from there. Most tickets hang straight
-/// off an epic, but some sit under a story that hangs off one.
+/// Half of Sprint 29 had no epic above it, and "[no epic]" said nothing about
+/// where those tickets belonged: 24 hung off `#3916 Issues sprint 29`, a
+/// plain task the QA files bugs under. The root names that.
+enum Root<'a> {
+    /// An epic on the board.
+    Epic(&'a Item),
+    /// The chain ends at a ticket on the board that is not an epic.
+    Ticket(&'a Item),
+    /// The chain leaves the board: sync stores each parent's number and
+    /// title, so the first parent that is not a project item can still be
+    /// named.
+    OffBoard { number: u32, title: Option<String> },
+    /// No parent at all.
+    None,
+}
+
+impl Root<'_> {
+    /// Short name for a report line, `None` when there is no chain.
+    fn short_name(&self) -> Option<String> {
+        match self {
+            Root::Epic(i) | Root::Ticket(i) => Some(epic_short_name(i)),
+            Root::OffBoard {
+                title: Some(title), ..
+            } => Some(short_root_name(title)),
+            Root::OffBoard {
+                number,
+                title: None,
+            } => Some(format!("#{}", number)),
+            Root::None => None,
+        }
+    }
+
+    /// Name of the rollup group, with the format's own issue link.
+    fn group_name(&self, link: &dyn Fn(&Item) -> String) -> String {
+        match self {
+            Root::Epic(i) | Root::Ticket(i) => format!("{} {}", link(i), epic_short_name(i)),
+            Root::OffBoard { number, title } => format!(
+                "#{} {}",
+                number,
+                title
+                    .as_deref()
+                    .map(short_root_name)
+                    .unwrap_or_else(|| "(not on the board)".to_string())
+            ),
+            Root::None => "No parent".to_string(),
+        }
+    }
+
+    /// Grouping key. Board items by project item id (issue numbers repeat
+    /// across the project's repositories), off-board parents by number.
+    fn key(&self) -> String {
+        match self {
+            Root::Epic(i) | Root::Ticket(i) => format!("item:{}", i.id),
+            Root::OffBoard { number, .. } => format!("off:{}", number),
+            Root::None => "none".to_string(),
+        }
+    }
+
+    /// Sort rank: epics, then other roots, then "no parent".
+    fn rank(&self) -> u8 {
+        match self {
+            Root::Epic(_) => 0,
+            Root::Ticket(_) | Root::OffBoard { .. } => 1,
+            Root::None => 2,
+        }
+    }
+}
+
+/// Walk up the sub-issue chain to its root.
+///
+/// Sync fetches only ONE parent level (`parent_number`, `parent_title`), so
+/// the rest of the chain is rebuilt from the board itself: the parent is
+/// looked up among the loaded items and its own parent read from there.
+/// Most tickets hang straight off an epic, but some sit under a story that
+/// hangs off one.
 ///
 /// Matching on number AND repository is deliberate: the project spans several
 /// repositories and the same issue number exists in more than one of them.
-fn resolve_epic<'a>(item: &Item, items: &'a [Item]) -> Option<&'a Item> {
-    let mut parent_number = item.parent_number;
+fn resolve_root<'a>(item: &Item, items: &'a [Item]) -> Root<'a> {
+    let Some(mut number) = item.parent_number else {
+        return Root::None;
+    };
+    let mut title = item.parent_title.clone();
     let repo = item.repository.as_deref();
     for _ in 0..MAX_PARENT_HOPS {
-        let number = parent_number?;
-        let parent = items
+        let Some(parent) = items
             .iter()
-            .find(|i| i.number == Some(number) && i.repository.as_deref() == repo)?;
+            .find(|i| i.number == Some(number) && i.repository.as_deref() == repo)
+        else {
+            return Root::OffBoard { number, title };
+        };
         if is_epic(parent) {
-            return Some(parent);
+            return Root::Epic(parent);
         }
-        parent_number = parent.parent_number;
+        match parent.parent_number {
+            Some(next) => {
+                number = next;
+                title = parent.parent_title.clone();
+            }
+            None => return Root::Ticket(parent),
+        }
     }
-    None
+    // Deeper than any real chain: treat as a cycle and give up.
+    Root::None
+}
+
+/// The EPIC an item belongs to, if the chain above it reaches one.
+#[cfg(test)]
+fn resolve_epic<'a>(item: &Item, items: &'a [Item]) -> Option<&'a Item> {
+    match resolve_root(item, items) {
+        Root::Epic(epic) => Some(epic),
+        _ => None,
+    }
 }
 
 /// Whether an enhancement was raised BY QA.
@@ -1113,12 +1329,12 @@ fn qa_verb(item: &Item) -> &'static str {
     }
 }
 
-/// Epic prefix for a ticket line: `[Dave project] `, or `[no epic] ` when the
-/// chain above the ticket holds no epic at all.
+/// Root prefix for a ticket line: `[Dave project] ` for an epic, `[Issues
+/// sprint 29] ` for a plain root task, `[no parent] ` when there is no chain.
 fn epic_tag(item: &Item, items: &[Item]) -> String {
-    match resolve_epic(item, items) {
-        Some(epic) => format!("[{}] ", epic_short_name(epic)),
-        None => "[no epic] ".to_string(),
+    match resolve_root(item, items).short_name() {
+        Some(name) => format!("[{}] ", name),
+        None => "[no parent] ".to_string(),
     }
 }
 
@@ -1457,6 +1673,9 @@ fn epic_group_line(g: &EpicGroup, name: &str) -> String {
     if g.in_qa > 0 {
         s.push_str(&format!(" | in QA: {}", g.in_qa));
     }
+    if g.in_uat > 0 {
+        s.push_str(&format!(" | in UAT: {}", g.in_uat));
+    }
     if g.tested > 0 {
         if g.failed > 0 {
             s.push_str(&format!(
@@ -1492,6 +1711,36 @@ fn total_open_bugs(d: &SprintReportData) -> usize {
         + d.bugs_in_uat.len()
         + d.bugs_for_dev.len()
         + d.bugs_blocked.len()
+}
+
+/// "Done: 14 (13%) = 6 Tech Complete + 8 Done". Tech Complete and Ready for
+/// Release are done as far as the sprint goes - the release note ships them -
+/// and the split stays visible for whoever prepares that release.
+fn done_summary(d: &SprintReportData) -> String {
+    let head = format!("Done: {} ({:.0}%)", d.done_count, d.done_pct);
+    let mut parts = Vec::new();
+    if d.tech_complete_count > 0 {
+        parts.push(format!("{} Tech Complete", d.tech_complete_count));
+    }
+    if d.ready_release_count > 0 {
+        parts.push(format!("{} Ready for Release", d.ready_release_count));
+    }
+    if d.done_column_count > 0 {
+        parts.push(format!("{} Done", d.done_column_count));
+    }
+    if parts.len() > 1 {
+        format!("{} = {}", head, parts.join(" + "))
+    } else {
+        head
+    }
+}
+
+/// "39 tested since Sep 14" - the window the QA metrics cover, when scoped.
+fn tested_summary(d: &SprintReportData) -> String {
+    match d.metrics_since {
+        Some(day) => format!("{} tested since {}", d.tested_count, day.format("%b %d")),
+        None => format!("{} tested", d.tested_count),
+    }
 }
 
 /// Build a priority summary string from a list of items, e.g. " (1×P0, 2×P1, 3×P4)".
@@ -1537,31 +1786,16 @@ pub fn sprint_report_md(app: &App) -> String {
     if data.in_uat_count > 0 {
         r.push_str(&format!("- In UAT: {}\n", data.in_uat_count));
     }
-    if data.tech_complete_count > 0 {
-        r.push_str(&format!("- Tech Complete: {}\n", data.tech_complete_count));
-    }
-    if data.ready_release_count > 0 {
-        r.push_str(&format!(
-            "- Ready for Release: {}\n",
-            data.ready_release_count
-        ));
-    }
-    r.push_str(&format!(
-        "- Done: {} ({:.0}%)\n",
-        data.done_count, data.done_pct
-    ));
+    r.push_str(&format!("- {}\n", done_summary(&data)));
     if data.blocked_count > 0 {
         r.push_str(&format!("- Blocked: {}\n", data.blocked_count));
     }
 
     // ── By EPIC ──
     if !data.epics.is_empty() {
-        r.push_str("\n### By EPIC\n");
+        r.push_str("\n### By EPIC / root ticket\n");
         for g in &data.epics {
-            let name = match g.epic {
-                Some(e) => format!("{} {}", issue_link_md(e), epic_short_name(e)),
-                None => "No EPIC".to_string(),
-            };
+            let name = g.root.group_name(&issue_link_md);
             r.push_str(&format!("- {}\n", epic_group_line(g, &name)));
         }
     }
@@ -1600,7 +1834,7 @@ pub fn sprint_report_md(app: &App) -> String {
         }
         if !data.bugs_blocked.is_empty() {
             r.push_str(&format!(
-                "- Blocked: {}{}\n",
+                "- Backlog / Blocked: {}{}\n",
                 data.bugs_blocked.len(),
                 prio_summary(&data.bugs_blocked)
             ));
@@ -1610,10 +1844,7 @@ pub fn sprint_report_md(app: &App) -> String {
     // ── QA Results ──
     if data.tested_count > 0 {
         let pass_pct = data.passed_count as f64 * 100.0 / data.tested_count as f64;
-        r.push_str(&format!(
-            "\n### QA Results ({} tested)\n",
-            data.tested_count
-        ));
+        r.push_str(&format!("\n### QA Results ({})\n", tested_summary(&data)));
         r.push_str(&format!(
             "- Passed: {} ({:.0}%)\n",
             data.passed_count, pass_pct
@@ -1702,19 +1933,7 @@ pub fn sprint_report_text(app: &App) -> String {
     if data.in_uat_count > 0 {
         r.push_str(&format!("• In UAT: {}\n", data.in_uat_count));
     }
-    if data.tech_complete_count > 0 {
-        r.push_str(&format!("• Tech Complete: {}\n", data.tech_complete_count));
-    }
-    if data.ready_release_count > 0 {
-        r.push_str(&format!(
-            "• Ready for Release: {}\n",
-            data.ready_release_count
-        ));
-    }
-    r.push_str(&format!(
-        "• Done: {} ({:.0}%)\n",
-        data.done_count, data.done_pct
-    ));
+    r.push_str(&format!("• {}\n", done_summary(&data)));
     if data.blocked_count > 0 {
         r.push_str(&format!("• Blocked: {}\n", data.blocked_count));
     }
@@ -1722,12 +1941,9 @@ pub fn sprint_report_text(app: &App) -> String {
     // ── Bugs ──
     // ── By EPIC ──
     if !data.epics.is_empty() {
-        r.push_str("\nBy EPIC:\n");
+        r.push_str("\nBy EPIC / root ticket:\n");
         for g in &data.epics {
-            let name = match g.epic {
-                Some(e) => format!("{} {}", issue_num_text(e), epic_short_name(e)),
-                None => "No EPIC".to_string(),
-            };
+            let name = g.root.group_name(&issue_num_text);
             r.push_str(&format!("• {}\n", epic_group_line(g, &name)));
         }
     }
@@ -1765,7 +1981,7 @@ pub fn sprint_report_text(app: &App) -> String {
         }
         if !data.bugs_blocked.is_empty() {
             r.push_str(&format!(
-                "• Blocked: {}{}\n",
+                "• Backlog / Blocked: {}{}\n",
                 data.bugs_blocked.len(),
                 prio_summary(&data.bugs_blocked)
             ));
@@ -1775,7 +1991,7 @@ pub fn sprint_report_text(app: &App) -> String {
     // ── QA Results ──
     if data.tested_count > 0 {
         let pass_pct = data.passed_count as f64 * 100.0 / data.tested_count as f64;
-        r.push_str(&format!("\nQA Results ({} tested):\n", data.tested_count));
+        r.push_str(&format!("\nQA Results ({}):\n", tested_summary(&data)));
         r.push_str(&format!(
             "• Passed: {} ({:.0}%)\n",
             data.passed_count, pass_pct
@@ -1862,19 +2078,7 @@ pub fn sprint_report_slack(app: &App) -> String {
     if data.in_uat_count > 0 {
         r.push_str(&format!("• In UAT: {}\n", data.in_uat_count));
     }
-    if data.tech_complete_count > 0 {
-        r.push_str(&format!("• Tech Complete: {}\n", data.tech_complete_count));
-    }
-    if data.ready_release_count > 0 {
-        r.push_str(&format!(
-            "• Ready for Release: {}\n",
-            data.ready_release_count
-        ));
-    }
-    r.push_str(&format!(
-        "• Done: {} ({:.0}%)\n",
-        data.done_count, data.done_pct
-    ));
+    r.push_str(&format!("• {}\n", done_summary(&data)));
     if data.blocked_count > 0 {
         r.push_str(&format!("• Blocked: {}\n", data.blocked_count));
     }
@@ -1882,16 +2086,11 @@ pub fn sprint_report_slack(app: &App) -> String {
     // ── Bugs ──
     // ── By EPIC ──
     if !data.epics.is_empty() {
-        r.push_str("\n*By EPIC*\n");
+        r.push_str("\n*By EPIC / root ticket*\n");
         for g in &data.epics {
-            let name = match g.epic {
-                Some(e) => format!(
-                    "{} {}",
-                    issue_link_slack(e, &app.config.owner),
-                    epic_short_name(e)
-                ),
-                None => "No EPIC".to_string(),
-            };
+            let name = g
+                .root
+                .group_name(&|e: &Item| issue_link_slack(e, &app.config.owner));
             r.push_str(&format!("• {}\n", epic_group_line(g, &name)));
         }
     }
@@ -1929,7 +2128,7 @@ pub fn sprint_report_slack(app: &App) -> String {
         }
         if !data.bugs_blocked.is_empty() {
             r.push_str(&format!(
-                "• Blocked: {}{}\n",
+                "• Backlog / Blocked: {}{}\n",
                 data.bugs_blocked.len(),
                 prio_summary(&data.bugs_blocked)
             ));
@@ -1939,7 +2138,7 @@ pub fn sprint_report_slack(app: &App) -> String {
     // ── QA Results ──
     if data.tested_count > 0 {
         let pass_pct = data.passed_count as f64 * 100.0 / data.tested_count as f64;
-        r.push_str(&format!("\n*QA Results* ({} tested)\n", data.tested_count));
+        r.push_str(&format!("\n*QA Results* ({})\n", tested_summary(&data)));
         r.push_str(&format!(
             "• Passed: {} ({:.0}%)\n",
             data.passed_count, pass_pct
@@ -2276,11 +2475,11 @@ mod tests {
     fn test_classify_generic_actions_return_worked_on() {
         // In Progress from non-QA columns = generic WorkedOn
         let kind = classify_status_change(Some("Backlog"), Some("In Progress"));
-        assert!(matches!(kind, Some(ActionKind::WorkedOn(_))));
+        assert!(matches!(kind, Some(ActionKind::WorkedOn { .. })));
 
         // Ready for Dev = generic WorkedOn
         let kind = classify_status_change(Some("Backlog"), Some("Ready for Dev"));
-        assert!(matches!(kind, Some(ActionKind::WorkedOn(_))));
+        assert!(matches!(kind, Some(ActionKind::WorkedOn { .. })));
     }
 
     #[test]
@@ -2292,9 +2491,10 @@ mod tests {
 
     #[test]
     fn test_classify_ready_for_release() {
-        // QA moves ticket to Ready for Release = VerifiedForRelease
+        // Tech Complete -> Ready for Release is the release step after QA,
+        // not a verdict: reported as the move it was.
         let kind = classify_status_change(Some("Tech Complete"), Some("Ready for Release"));
-        assert_eq!(kind, Some(ActionKind::VerifiedForRelease));
+        assert!(matches!(kind, Some(ActionKind::WorkedOn { .. })));
 
         let kind = classify_status_change(Some("In QA"), Some("Ready for Release"));
         assert_eq!(kind, Some(ActionKind::VerifiedForRelease));
@@ -2406,7 +2606,7 @@ mod tests {
             vec![label_evt("Ready-for-UAT", make_utc(2026, 3, 2, 3, 0))],
         );
         assert_eq!(
-            latest_qa_verdict(&t).map(|(v, _)| v),
+            latest_qa_verdict(&t, None).map(|(v, _)| v),
             Some(QaVerdict::Passed)
         );
     }
@@ -2423,7 +2623,7 @@ mod tests {
             vec![label_evt("Ready-for-Staging", make_utc(2026, 3, 4, 3, 0))],
         );
         assert_eq!(
-            latest_qa_verdict(&t).map(|(v, _)| v),
+            latest_qa_verdict(&t, None).map(|(v, _)| v),
             Some(QaVerdict::Passed)
         );
 
@@ -2437,7 +2637,7 @@ mod tests {
             vec![label_evt("Ready-for-Staging", make_utc(2026, 3, 4, 3, 0))],
         );
         assert_eq!(
-            latest_qa_verdict(&t).map(|(v, _)| v),
+            latest_qa_verdict(&t, None).map(|(v, _)| v),
             Some(QaVerdict::Failed)
         );
     }
@@ -2453,7 +2653,7 @@ mod tests {
             ],
             vec![],
         );
-        assert_eq!(latest_qa_verdict(&t), None);
+        assert_eq!(latest_qa_verdict(&t, None), None);
     }
 
     #[test]
@@ -2468,7 +2668,7 @@ mod tests {
             vec![],
         );
         assert_eq!(
-            latest_qa_verdict(&t).map(|(v, _)| v),
+            latest_qa_verdict(&t, None).map(|(v, _)| v),
             Some(QaVerdict::Passed)
         );
     }
@@ -2628,13 +2828,14 @@ mod tests {
                 number: Some(9),
                 title: "ticket".into(),
                 parent_number: Some(1),
+                parent_title: Some("Story in the web repo".into()),
                 repository: Some("org/web".into()),
                 ..Default::default()
             },
         ];
 
         assert!(resolve_epic(&items[1], &items).is_none());
-        assert_eq!(epic_tag(&items[1], &items), "[no epic] ");
+        assert_eq!(epic_tag(&items[1], &items), "[Story in the web repo] ");
     }
 
     #[test]
@@ -2713,6 +2914,562 @@ mod tests {
             ["qa-enh"],
             "only the enhancement QA raised counts as an issue found"
         );
+    }
+
+    /// Yesterday in the configured timezone (UTC+7 by default) at a fixed
+    /// local time, so two events built from it fall on the same workday.
+    fn yesterday_at(hour: u32, minute: u32) -> DateTime<Utc> {
+        let tz = FixedOffset::east_opt(7 * 3600).unwrap();
+        let day = (Utc::now().with_timezone(&tz) - chrono::Duration::days(1)).date_naive();
+        tz.from_local_datetime(&day.and_hms_opt(hour, minute, 0).unwrap())
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn test_standup_takes_the_latest_verdict_across_status_and_label_events() {
+        // #1154, Sprint 29: failed on STG at 17:12, moved back into QA at 17:15,
+        // passed STG (label) at 17:16. The standup said "Failed on STG" because
+        // label passes were only consulted when no status event matched.
+        use crate::app::App;
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![Item {
+            id: "retested".into(),
+            number: Some(1154),
+            title: "address field".into(),
+            status: Status::InQA,
+            status_history: Some(vec![
+                status_evt("In QA", "In Progress", yesterday_at(17, 12)),
+                status_evt("In Progress", "In QA", yesterday_at(17, 15)),
+            ]),
+            label_history: Some(vec![label_evt("Ready-for-UAT", yesterday_at(17, 16))]),
+            ..Default::default()
+        }];
+
+        let data = collect_daily_standup(&app);
+        assert!(data.failed.is_empty(), "the later pass supersedes the fail");
+        assert_eq!(data.tested.len(), 1);
+        assert_eq!(data.tested[0].kind, ActionKind::PassedStg);
+    }
+
+    #[test]
+    fn test_standup_reports_the_later_of_two_passes_on_one_day() {
+        // Passed Dev in the morning, STG deployed, passed STG in the afternoon:
+        // the day's result is the STG pass, not the first label found.
+        use crate::app::App;
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![Item {
+            id: "twice".into(),
+            number: Some(2),
+            title: "fast lane".into(),
+            status: Status::InQA,
+            status_history: Some(vec![]),
+            label_history: Some(vec![
+                label_evt("Ready-for-Staging", yesterday_at(9, 0)),
+                label_evt("Ready-for-UAT", yesterday_at(15, 0)),
+            ]),
+            ..Default::default()
+        }];
+
+        let data = collect_daily_standup(&app);
+        assert_eq!(data.tested.len(), 1);
+        assert_eq!(data.tested[0].kind, ActionKind::PassedStg);
+    }
+
+    #[test]
+    fn test_tech_complete_is_only_verified_when_it_comes_out_of_a_qa_column() {
+        // #3874/#3879: moved Ready for Dev -> Tech Complete by the QA, never in
+        // a QA column. The standup called that "Verified, ready for release"
+        // while the sprint report (correctly) did not count it as tested.
+        let kind = classify_status_change(Some("Ready for Dev"), Some("Tech Complete"))
+            .expect("a move by the QA is still worth reporting");
+        assert!(!matches!(kind, ActionKind::VerifiedForRelease));
+        assert_eq!(
+            kind.full_description(),
+            "Moved Ready for Dev → Tech Complete"
+        );
+
+        // Same for Done, and for the release-management step after QA.
+        assert!(!matches!(
+            classify_status_change(Some("In Progress"), Some("Done")),
+            Some(ActionKind::TestComplete)
+        ));
+        assert!(!matches!(
+            classify_status_change(Some("Tech Complete"), Some("Ready for Release")),
+            Some(ActionKind::VerifiedForRelease)
+        ));
+
+        // The real verdicts are untouched.
+        assert_eq!(
+            classify_status_change(Some("In UAT"), Some("Tech Complete")),
+            Some(ActionKind::VerifiedForRelease)
+        );
+        assert_eq!(
+            classify_status_change(Some("In QA"), Some("Done")),
+            Some(ActionKind::TestComplete)
+        );
+    }
+
+    #[test]
+    fn test_a_bug_the_qa_filed_and_assigned_to_a_dev_is_an_issue_found() {
+        // #3989: filed by the QA through the form, assigned to the developers
+        // only. The assignee heuristic missed it and the ticket surfaced as
+        // "Worked on ticket (Ready for Dev)" instead.
+        use crate::app::App;
+        let created = yesterday_at(11, 15);
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![Item {
+            id: "bug".into(),
+            number: Some(3989),
+            title: "[BUG] wrong billing flow".into(),
+            status: Status::ReadyForDev,
+            labels: vec!["Bug".into()],
+            assignees: vec!["dev1".into(), "dev2".into()],
+            created_at: Some(created),
+            status_history: Some(vec![status_evt("", "Ready for Dev", created)]),
+            label_history: Some(vec![label_evt("Bug", created)]),
+            ..Default::default()
+        }];
+
+        let data = collect_daily_standup(&app);
+        assert_eq!(data.issues_found.len(), 1, "the QA filed it");
+        assert!(data.tested.is_empty(), "and it is not 'work on a ticket'");
+    }
+
+    #[test]
+    fn test_a_bug_a_dev_filed_and_assigned_to_the_qa_is_not_an_issue_found() {
+        use crate::app::App;
+        let created = yesterday_at(11, 15);
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        let mut dev_evt = status_evt("", "Ready for Dev", created);
+        dev_evt.actor = Some("dev1".into());
+        let mut dev_label = label_evt("Bug", created);
+        dev_label.actor = Some("dev1".into());
+        app.items = vec![Item {
+            id: "dev-bug".into(),
+            number: Some(7),
+            title: "[BUG] found by a dev".into(),
+            status: Status::ReadyForDev,
+            labels: vec!["Bug".into()],
+            assignees: vec!["qa".into()],
+            created_at: Some(created),
+            status_history: Some(vec![dev_evt]),
+            label_history: Some(vec![dev_label]),
+            ..Default::default()
+        }];
+
+        let data = collect_daily_standup(&app);
+        assert!(data.issues_found.is_empty(), "being assigned is not filing");
+    }
+
+    #[test]
+    fn test_epic_in_qa_matches_the_sprint_overview() {
+        // By EPIC said "in QA: 52" while the overview said "In QA: 50" - the
+        // epic rollup counted In UAT as QA, the overview lists it separately.
+        use crate::app::App;
+        let mut app = App::new();
+        app.items = vec![
+            Item {
+                number: Some(1),
+                title: "[Epic] Dave project".into(),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+            Item {
+                id: "a".into(),
+                number: Some(2),
+                title: "in qa".into(),
+                status: Status::InQA,
+                parent_number: Some(1),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+            Item {
+                id: "b".into(),
+                number: Some(3),
+                title: "in uat".into(),
+                status: Status::InUAT,
+                parent_number: Some(1),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+        ];
+
+        let data = collect_sprint_report(&app);
+        let dave = data
+            .epics
+            .iter()
+            .find(|g| matches!(g.root, Root::Epic(_)))
+            .expect("epic group");
+        assert_eq!(dave.in_qa, 1, "In UAT is not In QA");
+        assert_eq!(dave.in_uat, 1);
+        let in_qa_sum: usize = data.epics.iter().map(|g| g.in_qa).sum();
+        assert_eq!(in_qa_sum, data.in_qa_pipeline);
+        assert!(epic_group_line(dave, "Dave").contains("in UAT: 1"));
+    }
+
+    #[test]
+    fn test_verdicts_before_the_sprint_started_do_not_count_as_this_sprints_testing() {
+        // 12 of Sprint 29's 39 "tested" verdicts were dated before the sprint
+        // began (carry-overs passed on Dev weeks earlier and never deployed).
+        let t = tl(
+            vec![],
+            vec![label_evt("Ready-for-Staging", make_utc(2026, 8, 28, 8, 15))],
+        );
+        let sprint_start = make_utc(2026, 9, 13, 17, 0); // Sep 14 00:00 UTC+7
+        assert_eq!(latest_qa_verdict(&t, Some(sprint_start)), None);
+        assert_eq!(
+            latest_qa_verdict(&t, None).map(|(v, _)| v),
+            Some(QaVerdict::Passed),
+            "without a window the verdict still stands"
+        );
+
+        // A fail before the window and a pass inside it: only the pass counts.
+        let t = tl(
+            vec![status_evt(
+                "In QA",
+                "In Progress",
+                make_utc(2026, 9, 9, 8, 0),
+            )],
+            vec![label_evt("Ready-for-UAT", make_utc(2026, 9, 15, 8, 0))],
+        );
+        assert_eq!(
+            latest_qa_verdict(&t, Some(sprint_start)).map(|(v, _)| v),
+            Some(QaVerdict::Passed)
+        );
+    }
+
+    #[test]
+    fn test_sprint_report_scopes_qa_results_to_the_sprint_window() {
+        use crate::app::App;
+        use crate::models::field::{Field, FieldOption, FieldType};
+        let mut app = App::new();
+        app.fields = vec![Field {
+            id: "f".into(),
+            name: "Sprint".into(),
+            field_type: FieldType::Iteration,
+            options: vec![FieldOption {
+                id: "o".into(),
+                name: "Sprint 29".into(),
+                start_date: NaiveDate::from_ymd_opt(2026, 9, 14),
+                duration_days: Some(14),
+            }],
+        }];
+        app.board_sprint_filter = Some("Sprint 29".into());
+        app.items = vec![
+            Item {
+                id: "old-pass".into(),
+                number: Some(1),
+                title: "passed on Dev in August, still waiting for deploy".into(),
+                status: Status::InQADev,
+                sprint: Some("Sprint 29".into()),
+                labels: vec!["Ready-for-Staging".into()],
+                status_history: Some(vec![]),
+                label_history: Some(vec![label_evt(
+                    "Ready-for-Staging",
+                    make_utc(2026, 8, 28, 8, 15),
+                )]),
+                ..Default::default()
+            },
+            Item {
+                id: "old-fail".into(),
+                number: Some(2),
+                title: "failed before the sprint, still not fixed".into(),
+                status: Status::InReview,
+                sprint: Some("Sprint 29".into()),
+                status_history: Some(vec![status_evt(
+                    "In QA",
+                    "In Progress",
+                    make_utc(2026, 9, 9, 8, 13),
+                )]),
+                ..Default::default()
+            },
+            Item {
+                id: "new-pass".into(),
+                number: Some(3),
+                title: "passed STG this sprint".into(),
+                status: Status::InQA,
+                sprint: Some("Sprint 29".into()),
+                status_history: Some(vec![]),
+                label_history: Some(vec![label_evt(
+                    "Ready-for-UAT",
+                    make_utc(2026, 9, 18, 4, 52),
+                )]),
+                ..Default::default()
+            },
+        ];
+
+        let data = collect_sprint_report(&app);
+        assert_eq!(data.tested_count, 1, "only this sprint's verdict");
+        assert_eq!(data.passed_count, 1);
+        assert_eq!(data.failed_count, 0);
+        assert_eq!(data.metrics_since, NaiveDate::from_ymd_opt(2026, 9, 14));
+        // The retest list is about the ticket's CURRENT state, so a pre-sprint
+        // fail that was never retested still shows.
+        assert_eq!(data.retest_items.len(), 1);
+        assert!(data.retest_items[0].currently_failed);
+        let epic_tested: usize = data.epics.iter().map(|g| g.tested).sum();
+        assert_eq!(epic_tested, data.tested_count);
+    }
+
+    #[test]
+    fn test_standup_yesterday_covers_work_outside_the_sprint_filter() {
+        // Day one of a sprint: Friday's Tech Complete tickets still sit in the
+        // previous sprint, so a sprint-scoped scan lost them from Monday's standup.
+        use crate::app::App;
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = Some("Sprint 29".into());
+        app.items = vec![
+            Item {
+                id: "prev-sprint".into(),
+                number: Some(1),
+                title: "verified on Friday".into(),
+                status: Status::TechComplete,
+                sprint: Some("Sprint 28".into()),
+                status_history: Some(vec![status_evt(
+                    "In UAT",
+                    "Tech Complete",
+                    yesterday_at(9, 30),
+                )]),
+                ..Default::default()
+            },
+            Item {
+                id: "no-timeline-elsewhere".into(),
+                number: Some(2),
+                title: "backlog item in another sprint, never fetched".into(),
+                status: Status::Backlog,
+                sprint: Some("Sprint 30".into()),
+                ..Default::default()
+            },
+            Item {
+                id: "no-timeline-here".into(),
+                number: Some(3),
+                title: "sprint item, timeline not fetched yet".into(),
+                status: Status::InQA,
+                sprint: Some("Sprint 29".into()),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+        ];
+
+        let data = collect_daily_standup(&app);
+        assert_eq!(data.tested.len(), 1);
+        assert_eq!(data.tested[0].item.id, "prev-sprint");
+        assert_eq!(
+            data.missing_history, 1,
+            "only the sprint's own tickets count as missing"
+        );
+    }
+
+    #[test]
+    fn test_report_wording_does_not_invent_intent() {
+        assert_eq!(ActionKind::Commented.description(), "Reviewed & commented");
+        let moved = classify_status_change(Some("Backlog"), Some("Ready for Dev")).unwrap();
+        assert_eq!(moved.full_description(), "Moved Backlog → Ready for Dev");
+        let moved = classify_status_change(None, Some("Ready for Dev")).unwrap();
+        assert_eq!(moved.full_description(), "Moved to Ready for Dev");
+    }
+
+    #[test]
+    fn test_date_helpers_survive_a_bad_timezone_offset() {
+        // is_ot and report_date guard the offset; these two used to unwrap.
+        let now = Utc::now();
+        let _ = is_today(now, 99);
+        let _ = is_previous_workday(now, 99);
+    }
+
+    fn status_evt_by(
+        actor: &str,
+        prev: &str,
+        curr: &str,
+        at: DateTime<Utc>,
+    ) -> crate::gh::timeline::StatusChangedEvent {
+        let mut e = status_evt(prev, curr, at);
+        e.actor = Some(actor.to_string());
+        e
+    }
+
+    #[test]
+    fn test_a_move_the_same_person_reverts_within_minutes_is_an_undo() {
+        // #3844, Sprint 29: failed on STG for real earlier (here: a week
+        // before, so it sits outside every "yesterday" window); dev moved it
+        // to In QA - Dev; yesterday 11:11 QA moved it to In Progress and at
+        // 11:17 moved it straight back - a misclick, per the QA. The standup
+        // said "Failed on Dev" and the sprint report said "failed 2×".
+        use crate::app::App;
+        let earlier = |h, m| yesterday_at(h, m) - chrono::Duration::days(7);
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![Item {
+            id: "3844".into(),
+            number: Some(3844),
+            title: "reorder flow".into(),
+            status: Status::InQADev,
+            status_history: Some(vec![
+                status_evt_by("qa", "In QA", "In Progress", earlier(16, 41)),
+                status_evt_by("dev", "In Progress", "In QA - Dev", earlier(19, 49)),
+                status_evt_by("qa", "In QA - Dev", "In Progress", yesterday_at(11, 11)),
+                status_evt_by("qa", "In Progress", "In QA - Dev", yesterday_at(11, 17)),
+            ]),
+            ..Default::default()
+        }];
+
+        let daily = collect_daily_standup(&app);
+        assert!(daily.failed.is_empty(), "the undone fail is not a fail");
+        assert!(daily.tested.is_empty(), "nor is it any other action");
+
+        let sprint = collect_sprint_report(&app);
+        assert_eq!(sprint.failed_count, 1, "the earlier fail still stands");
+        assert_eq!(sprint.retest_items.len(), 1);
+        assert_eq!(sprint.retest_items[0].fail_count, 1, "not 2");
+        assert!(sprint.retest_items[0].currently_failed);
+    }
+
+    #[test]
+    fn test_a_reversal_by_someone_else_is_not_an_undo() {
+        // QA fails at 11:11, the dev puts it straight back into QA at 11:17
+        // (say the fix was a one-liner): two real actions.
+        use crate::app::App;
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![Item {
+            id: "quick-fix".into(),
+            number: Some(1),
+            title: "quick fix".into(),
+            status: Status::InQA,
+            status_history: Some(vec![
+                status_evt_by("qa", "In QA", "In Progress", yesterday_at(11, 11)),
+                status_evt_by("dev", "In Progress", "In QA", yesterday_at(11, 17)),
+            ]),
+            ..Default::default()
+        }];
+        let daily = collect_daily_standup(&app);
+        assert_eq!(daily.failed.len(), 1);
+        assert_eq!(daily.failed[0].kind, ActionKind::FailedOnStg);
+    }
+
+    #[test]
+    fn test_a_reversal_after_the_undo_window_is_not_an_undo() {
+        use crate::app::App;
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.board_sprint_filter = None;
+        app.items = vec![Item {
+            id: "slow".into(),
+            number: Some(1),
+            title: "changed my mind two hours later".into(),
+            status: Status::InQA,
+            status_history: Some(vec![
+                status_evt_by("qa", "In QA", "In Progress", yesterday_at(9, 0)),
+                status_evt_by("qa", "In Progress", "In QA", yesterday_at(11, 0)),
+            ]),
+            ..Default::default()
+        }];
+        let daily = collect_daily_standup(&app);
+        assert_eq!(daily.failed.len(), 1, "two hours apart is two decisions");
+    }
+
+    #[test]
+    fn test_done_counts_tech_complete_and_ready_for_release() {
+        // Tech Complete is done as far as the sprint goes (the release note
+        // ships it); the overview used to count the Done column alone.
+        use crate::app::App;
+        let mut app = App::new();
+        let mk = |id: &str, status: Status| Item {
+            id: id.into(),
+            title: id.into(),
+            status,
+            ..Default::default()
+        };
+        app.items = vec![
+            mk("tc", Status::TechComplete),
+            mk("rfr", Status::ReadyForRelease),
+            mk("done", Status::Done),
+            mk("qa", Status::InQA),
+        ];
+        let data = collect_sprint_report(&app);
+        assert_eq!(data.done_count, 3);
+        assert_eq!(data.done_pct, 75.0);
+        let text = sprint_report_text(&app);
+        assert!(
+            text.contains("• Done: 3 (75%) = 1 Tech Complete + 1 Ready for Release + 1 Done"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("• Tech Complete: 1"),
+            "folded into Done: {text}"
+        );
+    }
+
+    #[test]
+    fn test_a_ticket_under_a_non_epic_root_is_tagged_with_that_root() {
+        // 24 of Sprint 29's 54 "no epic" tickets hang off #3916 "Issues sprint
+        // 29", a plain task. The root of the chain is what traces them.
+        use crate::app::App;
+        let mut app = App::new();
+        app.items = vec![
+            Item {
+                id: "bucket".into(),
+                number: Some(3916),
+                title: "Issues sprint 29".into(),
+                labels: vec!["Task".into()],
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+            Item {
+                id: "bug".into(),
+                number: Some(3957),
+                title: "[BUG] expired invoices".into(),
+                labels: vec!["Bug".into()],
+                parent_number: Some(3916),
+                repository: Some("org/web".into()),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(epic_tag(&app.items[1], &app.items), "[Issues sprint 29] ");
+
+        let data = collect_sprint_report(&app);
+        let text = sprint_report_text(&app);
+        assert!(
+            text.contains("• #3916 Issues sprint 29 - 1 tickets (1 bugs)"),
+            "{text}"
+        );
+        // The bucket task itself has no parent.
+        assert!(text.contains("• No parent - 1 tickets"), "{text}");
+        assert_eq!(data.epics.len(), 2);
+    }
+
+    #[test]
+    fn test_a_parent_that_is_not_on_the_board_is_shown_by_its_synced_title() {
+        // Sync stores the parent's title even when the parent is not a
+        // project item, so the chain can still be named where it leaves the board.
+        let items = vec![Item {
+            number: Some(9),
+            title: "ticket".into(),
+            parent_number: Some(2491),
+            parent_title: Some("[Epic] Billing overhaul".into()),
+            repository: Some("org/web".into()),
+            ..Default::default()
+        }];
+        assert_eq!(epic_tag(&items[0], &items), "[Billing overhaul] ");
+
+        let orphan = Item {
+            number: Some(10),
+            title: "no chain at all".into(),
+            ..Default::default()
+        };
+        assert_eq!(epic_tag(&orphan, &items), "[no parent] ");
     }
 
     #[test]

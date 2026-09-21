@@ -299,7 +299,8 @@ pub fn render(f: &mut Frame, app: &App, area: Rect, with_menu_list: bool) {
     let count_of = |f: &dyn Fn(&crate::models::item::Item) -> bool| -> usize {
         filtered_items.iter().filter(|i| f(i)).count()
     };
-    let done_count = count_of(&|i| i.status == Status::Done);
+    // Tech Complete is done as far as the sprint goes (see Status::is_completed).
+    let done_count = count_of(&|i| i.status.is_completed());
     let in_qa_count =
         count_of(&|i| matches!(i.status, Status::InQA | Status::InQADev | Status::InUAT));
     let in_progress_count = count_of(&|i| i.status == Status::InProgress);

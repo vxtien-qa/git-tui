@@ -50,6 +50,15 @@ impl Status {
         Self::parse_known(s).unwrap_or(Self::Backlog)
     }
 
+    /// Whether the ticket is done as far as the sprint goes. Tech Complete
+    /// ships in the release note; Ready for Release and Done follow it.
+    pub fn is_completed(&self) -> bool {
+        matches!(
+            self,
+            Self::TechComplete | Self::ReadyForRelease | Self::Done
+        )
+    }
+
     /// Display label for the TUI.
     pub fn label(&self) -> &'static str {
         match self {
@@ -136,6 +145,19 @@ mod tests {
             let label = status.label();
             let parsed = Status::from_str(label);
             assert_eq!(*status, parsed, "Failed roundtrip for label: {}", label);
+        }
+    }
+
+    #[test]
+    fn test_is_completed_covers_everything_past_qa() {
+        // Tech Complete ships in the release note; Ready for Release and Done
+        // follow it. Nothing before Tech Complete is complete.
+        for s in Status::all_columns() {
+            let expected = matches!(
+                s,
+                Status::TechComplete | Status::ReadyForRelease | Status::Done
+            );
+            assert_eq!(s.is_completed(), expected, "{s}");
         }
     }
 
