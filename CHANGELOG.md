@@ -42,6 +42,7 @@ All notable changes to git-tui. Versions follow [semantic versioning](https://se
 
 ### Fixed
 
+- Background sync fetches the timeline of the report sprint's Backlog and Ready for Dev tickets too. Only the Dashboard fetched those, and it silently skipped whenever a sync was in flight, so a ticket filed straight into Ready for Dev counted as "no history data yet" in every report no matter how often you refreshed.
 - Standup picks the most significant QA action of the day and, among equals, the latest, across status moves and label passes together. A label pass was only consulted when no status move existed, so a ticket failed at 17:12 and passed on STG at 17:16 reported as `Failed on STG`, and two passes in one day reported the earlier one.
 - `Issues found` reads who filed the ticket from the timeline - the author gives it its first status and its type label within moments of creation - instead of guessing from the assignees. A bug the QA filed and assigned to two developers was missing; a bug a developer filed and assigned to the QA was claimed. The assignee guess remains only for tickets whose timeline is not fetched yet.
 - A bad `timezone_offset_hours` falls back to UTC instead of panicking in the middle of a report.

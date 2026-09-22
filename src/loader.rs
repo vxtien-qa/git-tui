@@ -18,6 +18,34 @@ pub fn timeline_cache_key(repo: &str, number: u32) -> String {
     format!("timeline_{}_{}", extract_repo_name(repo), number)
 }
 
+/// Whether the background sync fetches `item`'s timeline.
+///
+/// Active tickets always. Backlog and Ready for Dev are lazy - the Dashboard
+/// fetches them on open - except in the sprint the reports cover: that fetch
+/// is skipped whenever a sync is in flight, and every sync drops the in-memory
+/// histories, so a ticket filed straight into Ready for Dev (#4000, #4001 and
+/// #4004 in Sprint 29) reported "no history" through every refresh.
+pub fn sync_fetches_timeline(
+    item: &crate::models::item::Item,
+    report_sprint: Option<&str>,
+) -> bool {
+    use crate::models::status::Status;
+    match item.status {
+        Status::Backlog | Status::ReadyForDev => {
+            report_sprint.is_some() && item.sprint.as_deref() == report_sprint
+        }
+        Status::InProgress
+        | Status::Blocked
+        | Status::InReview
+        | Status::InQADev
+        | Status::InQA
+        | Status::InUAT
+        | Status::TechComplete
+        | Status::ReadyForRelease
+        | Status::Done => true,
+    }
+}
+
 /// Whether a detail fetch should be started for `item_id`.
 ///
 /// Deliberately does NOT consult `bg_rx`: that channel belongs to the
@@ -128,6 +156,11 @@ pub fn spawn_background_refresh(app: &mut App, quiet: bool) -> bool {
     let owner = app.config.owner.clone();
     let project_number = app.config.project_number;
     let cache_ttl = app.config.poll_interval_secs;
+    // The sprint the reports cover - its parked tickets get a timeline too.
+    let report_sprint = app
+        .board_sprint_filter
+        .clone()
+        .or_else(|| app.current_sprint_name());
 
     std::thread::spawn(move || {
         // Refresh the rate-limit cache off the UI thread so the cached-only
@@ -157,19 +190,6 @@ pub fn spawn_background_refresh(app: &mut App, quiet: bool) -> bool {
                     project_id: pid,
                 });
 
-                // Lazy: Only fetch timeline for ACTIVE items
-                let active_statuses = [
-                    crate::models::status::Status::InQA,
-                    crate::models::status::Status::InQADev,
-                    crate::models::status::Status::InUAT,
-                    crate::models::status::Status::InProgress,
-                    crate::models::status::Status::InReview,
-                    crate::models::status::Status::ReadyForRelease,
-                    crate::models::status::Status::Blocked,
-                    crate::models::status::Status::TechComplete,
-                    crate::models::status::Status::Done,
-                ];
-
                 // Batch + Cache: Batch GraphQL timeline queries
                 let timeline_cache = crate::cache::Cache::new(1800);
                 let tx_timeline = tx.clone();
@@ -179,7 +199,7 @@ pub fn spawn_background_refresh(app: &mut App, quiet: bool) -> bool {
                 std::thread::spawn(move || {
                     let mut batch_entries = Vec::new();
                     for (i, item) in items.iter().enumerate() {
-                        if !active_statuses.contains(&item.status) {
+                        if !sync_fetches_timeline(item, report_sprint.as_deref()) {
                             continue;
                         }
                         if let (Some(repo), Some(number)) = (item.repository.clone(), item.number) {
@@ -728,6 +748,43 @@ mod tests {
         assert!(!should_start_detail_fetch(&app, "PVTI_1"));
         // A different ticket still can be.
         assert!(should_start_detail_fetch(&app, "PVTI_2"));
+    }
+
+    #[test]
+    fn test_sync_fetches_timelines_for_the_report_sprints_parked_tickets() {
+        use crate::models::item::Item;
+        use crate::models::status::Status;
+
+        // #4000, #4001 and #4004 sat in Ready for Dev with no timeline through
+        // every refresh: the sync only fetched active statuses, and the
+        // Dashboard's own fetch is skipped whenever a sync is in flight.
+        let mut item = Item {
+            status: Status::ReadyForDev,
+            sprint: Some("Sprint 29".into()),
+            ..Default::default()
+        };
+        assert!(sync_fetches_timeline(&item, Some("Sprint 29")));
+        item.status = Status::Backlog;
+        assert!(sync_fetches_timeline(&item, Some("Sprint 29")));
+
+        // Another sprint's parked tickets are not the report's problem.
+        assert!(!sync_fetches_timeline(&item, Some("Sprint 30")));
+        // No sprint to report on: parked tickets stay lazy, as before.
+        assert!(!sync_fetches_timeline(&item, None));
+    }
+
+    #[test]
+    fn test_sync_fetches_active_timelines_whatever_the_sprint() {
+        use crate::models::item::Item;
+        use crate::models::status::Status;
+
+        let item = Item {
+            status: Status::InQA,
+            sprint: Some("Sprint 28".into()),
+            ..Default::default()
+        };
+        assert!(sync_fetches_timeline(&item, Some("Sprint 29")));
+        assert!(sync_fetches_timeline(&item, None));
     }
 
     #[test]
