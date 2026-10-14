@@ -33,12 +33,18 @@ holds no tokens of its own and inherits whatever access `gh` already has.
 - **Kanban board** over all 11 status columns of the project, with batch moves.
 - **My Tasks**, the tickets waiting on you, grouped by status, plus the ones you
   already passed that are waiting for a deploy.
-- **QA actions** bound to single keys: pass on Dev, pass on STG, clear UAT
-  regression, fail with a bug report, return as not fixed.
+- **QA actions** bound to single keys: pass on Dev, pass on STG, pass on UAT
+  one ticket or a picked batch, move tickets whose code reached UAT into
+  In UAT, fail with a bug report, return as not fixed, optionally into another
+  sprint.
+- **Linked PRs and a deploy check** in the ticket view: which of `develop`,
+  `staging`, `uat` and `production` already have each merged PR.
 - **Report forms** for bugs, enhancements and tasks that fill in the project
   fields, link the ticket to its parent and notify the right people.
 - **Search** across titles, numbers and assignees, with include and exclude
-  filters on status, priority, stack, sprint and label.
+  filters on status, priority, stack, sprint, label, EPIC and assignee, saved
+  filters, and a copy of the results as a linked list for GitHub, Notion or
+  Slack.
 - **Reports**: a daily standup and a sprint report with QA metrics, exported as
   Markdown, plain text, or posted to Slack.
 - **Slack notifications** for every QA action, with per-action toggles.
@@ -140,14 +146,27 @@ so the board always reflects what is actually deployed where.
 | --- | --- | --- | --- |
 | Pass Dev | `p` | In QA - Dev | Adds `Ready-for-Staging`, comments tagging the stack lead |
 | Pass STG | `P` | In QA | Adds `Ready-for-UAT`, comments tagging the stack lead |
-| Pass UAT | `U` | In UAT | Moves **every** In UAT ticket to Tech Complete, comments on each, posts one release summary |
+| Move to In UAT | `I` | In QA with `Ready-for-UAT` | Pick list of those tickets in the sprint; each checked one moves to In UAT, loses the label, gets a comment; one Slack message |
+| Pass UAT | `U` | In UAT | Moves the ticket to Tech Complete, comments, one Slack message |
+| Bulk verify UAT | `V` | In UAT | Pick list of the sprint's In UAT tickets, all checked; passes the checked ones together, one release summary |
 | Fail | `f` | any QA column | Opens the bug form, then moves the parent to In Progress and comments with a link to the new bug |
 | Return | `r` | anywhere but In Progress | Moves to In Progress, comments, clears both handoff labels |
 | Clear handoff | `x` | ticket with a `Ready-for-*` label | Removes the labels, so a returned ticket is testable again |
 
-UAT is a regression pass over everything deployed there, not a per ticket test,
-which is why `U` clears the whole column at once and sends a single aggregated
-message rather than one notification per ticket.
+A UAT regression run covers everything deployed there, so `V` passes a picked
+batch at once and sends a single aggregated message rather than one
+notification per ticket. `U` is for a ticket verified on its own.
+
+Fail and Return ask where the ticket goes next: keep its sprint, move it to the
+sprint running today, or to the next one (arrow keys in the confirm). Keep is
+the default.
+
+Before moving a ticket to In UAT, `d` in the ticket view checks its linked PRs
+against the deploy branches. `✓` means the branch has the PR's merge commit,
+`✗` that it does not, and `?` that the commit is not in the branch's history
+but the change may have arrived by cherry-pick, so it is never read as "not
+deployed". A ticket only shows the PRs GitHub links to it; one whose PR was
+never linked shows "none linked on GitHub".
 
 Each action is only offered from the column it belongs to. The QA actions menu
 (`p`) lists them all and dims the ones that do not apply, with the reason.
@@ -196,6 +215,8 @@ Each action is only offered from the column it belongs to. The QA actions menu
 | --- | --- |
 | `p` | QA actions menu |
 | `P`, `U` | Pass STG, Pass UAT |
+| `V`, `I` | Bulk verify UAT, Move to In UAT |
+| `d` | Deploy check of the linked PRs |
 | `f` | Fail and file a bug |
 | `b`, `e`, `t` | File a bug, an enhancement, or a task |
 | `c` | Comment |
@@ -204,6 +225,26 @@ Each action is only offered from the column it belongs to. The QA actions menu
 | `o` | Jump to the parent issue |
 | `y`, `w` | Copy as Markdown, open in a browser |
 | `r` | Reload |
+
+### Search
+
+| Key | Action |
+| --- | --- |
+| `Tab` | Next filter row: Status, Priority, Stack, Sprint, Label, EPIC, Assignee |
+| Left, Right | Move between a row's options |
+| `Space` | Include, exclude, off |
+| `Ctrl+Y` | Copy the results: `m` Markdown, `s` Slack |
+| `Ctrl+S`, `Ctrl+O` | Save the filters under a name, open the saved ones |
+| `Ctrl+L` | Clear the filters |
+
+### Pick lists and confirms
+
+| Key | Action |
+| --- | --- |
+| `Space`, `a` | Check a ticket, check all or none (Bulk verify UAT, Move to In UAT) |
+| `Enter` | Confirm the checked tickets |
+| Left, Right | Pick the sprint in a Fail or Return confirm |
+| `Enter` / `y`, `Esc` / `n` | Confirm, cancel |
 
 ### Forms
 
@@ -277,11 +318,20 @@ assignees rather than everyone.
   "slack_enabled": true,
   "slack_webhook_url": "https://hooks.slack.com/services/...",
   "slack_bot_token": "xoxb-...",
-  "slack_notify": { "pass_dev": true, "pass_uat": true, "bug_report": true },
+  "slack_notify": { "pass_dev": true, "pass_uat": true, "move_to_uat": true, "bug_report": true },
   "slack_user_map": {
     "github-username": { "slack_id": "U0EXAMPLE1", "slack_display": "Alex Lee" }
   },
-  "stack_leads": { "FE": ["fe-lead"], "BE": ["be-lead"] }
+  "stack_leads": { "FE": ["fe-lead"], "BE": ["be-lead"] },
+  "deploy_branches": [
+    { "env": "Dev", "branch": "develop" },
+    { "env": "STG", "branch": "staging" },
+    { "env": "UAT", "branch": "uat" },
+    { "env": "Prod", "branch": "production" }
+  ],
+  "search_presets": [
+    { "name": "In QA, not passed STG, mine", "status": ["In QA"], "label": ["!Ready-for-UAT"], "assignee": ["vxtien-qa"], "sprint": ["@current"] }
+  ]
 }
 ```
 
@@ -296,6 +346,8 @@ assignees rather than everyone.
 | `slack_notify.*` | One toggle per action | all `true` |
 | `slack_user_map` | GitHub username to Slack ID and display name | empty |
 | `stack_leads` | Stack to lead usernames, tagged on a handoff | empty |
+| `deploy_branches` | Environments and branches the deploy check compares with | Dev, STG, UAT, Prod = `develop`, `staging`, `uat`, `production` |
+| `search_presets` | Saved Search filters; sprints as `@current`, `@previous`, `@next` | empty |
 
 The webhook URL and bot token are stored in plain text, as `gh` stores its own
 credentials. Both are masked in the UI.

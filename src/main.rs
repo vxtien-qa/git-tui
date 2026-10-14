@@ -1714,6 +1714,15 @@ mod snapshot_tool {
                     *selected = 1;
                 }
             }
+            // Help, scrolled to `help-<line>`.
+            n if n.starts_with("help") => {
+                app.screen = Screen::Help;
+                app.help_scroll = n
+                    .strip_prefix("help-")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            }
+            "slack-notify" => app.screen = Screen::SlackNotifyConfig,
             "search-copy" => {
                 app.screen = Screen::Search;
                 app.filter_status = vec!["In QA".to_string()];

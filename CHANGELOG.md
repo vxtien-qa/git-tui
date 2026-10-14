@@ -2,7 +2,49 @@
 
 All notable changes to git-tui. Versions follow [semantic versioning](https://semver.org/).
 
-## Unreleased
+## v3.3.0 - UAT cycle and board query
+
+### Added
+
+- Item Detail lists the ticket's linked pull requests: the ones that close it, and the ones that mention it or were linked by hand, which is where bundle PRs and deploy-branch PRs show up. Each shows its state and base branch. They load with the detail, not the board sync.
+- `d` in Item Detail runs a deploy check: every merged linked PR is compared with `develop`, `staging`, `uat` and `production` through GitHub's compare API, and shows `✓` (in the branch), `✗` (not in it), `?` (not in its history, so it may have arrived by cherry-pick) or `-` (no such branch). A `?` is never reported as "not deployed". The branches are configurable as `deploy_branches`.
+- `V` (Bulk verify UAT) opens a pick list of the In UAT tickets in the sprint filter, all checked. `Space` unchecks one, `a` checks all or none, `Enter` passes the checked ones together: a comment on each and one Slack "Ready for release" summary.
+- `I` (Move to In UAT) is for tickets whose code reached UAT: a pick list of the sprint's In QA tickets carrying `Ready-for-UAT`, the ticket in hand checked, with the UAT result of any deploy check run this session. Each checked ticket moves to In UAT, loses the label and gets a comment; one Slack message lists them, behind a new `Move to In UAT` toggle.
+- Return and Fail can move the ticket to another sprint. Their confirm has a Sprint row cycled with the arrow keys: Keep, Today (the sprint running today) or Next. Keep is the default. Another pick writes the Sprint field and says so in the comment.
+- Search filters by EPIC (the root of the ticket's sub-issue chain, offered for roots that still have open work) and by assignee, with `(none)` for unassigned tickets.
+- `Ctrl+S` in Search saves the keyword and every filter under a name, and `Ctrl+O` loads or deletes a saved one. Sprints are saved as `@current`, `@previous` and `@next`, so a saved filter follows the calendar. They live in `config.json` as `search_presets`.
+- `Ctrl+Y` in Search copies every result as a linked list, as Markdown for GitHub and Notion, or as rich text for Slack (pasted `<url|text>` markup shows literally in Slack, pasted HTML keeps its links).
+
+### Changed
+
+- `U` (Pass UAT) passes the ticket it is pressed on, like Pass Dev and Pass STG: Tech Complete, the comment `Verified on UAT. Moving to Tech Complete.` and one Slack message. Passing the whole In UAT column at once moved to `V`.
+- The QA Actions menu shows one line per action when the terminal is too short for two, so its last rows and `Esc` no longer fall off the bottom.
+- Every report line names the root of the ticket's sub-issue chain: `[Dave project]` for an epic, `[Issues sprint 29]` for the plain task the QA files bugs under. Only a ticket with no parent at all is tagged `[no parent]`; half of Sprint 29 used to read `[no epic]`, which said nothing about where those tickets belonged. The root is found by walking the sub-issue chain: sync fetches only one parent level, so a ticket hanging off a story reaches its epic through the board, and a parent that is not on the board is named by its synced title. An epic is recognised by the `Epic` label or an `[Epic]` title prefix, because the board uses both.
+- Sprint report gains a `By EPIC / root ticket` rollup - tickets, bugs, how many are in QA and in UAT, and how many were tested, passed and failed per root, epics first and tickets with no parent last under `No parent`. `in QA` uses the Sprint Overview's definition (In QA and In QA - Dev) and In UAT is listed on its own, so the per-root counts add up to the sprint totals.
+- Daily standup reads as three separate things that happened yesterday: `Tested & Verified`, `Failed` and `Issues found`. A ticket QA filed used to appear twice, once as a generic "Worked on ticket (Ready for Dev)" line and again under the bug heading, and a rejection sat in among the passes where the team could miss it.
+- `Issues found` covers bugs and QA-raised enhancements, replacing the bug-only section.
+- Reports say what QA is doing to a ticket: `Testing` for a task, `Verifying` for a bug or an enhancement QA raised. Only the report form's upper-case `[ENHANCEMENT]` title prefix counts as a QA finding - the plain `Enhancement` label is also on dev feature work, which is tested, not verified.
+- New bug reports, enhancements and tasks are filed into the sprint running today, read from the Sprint field's iteration dates. They used to inherit the parent ticket's sprint (falling back to the board's sprint filter), so a bug raised while QAing a carried-over ticket landed in the sprint that ticket came from - and on day one of a sprint, before any item sits in it, everything went to the previous one. The form's `Sprint (auto)` line now shows the same value that gets written.
+- QA Results count only verdicts given since the sprint's first day, read from the Sprint field's iteration `startDate`, and the heading says so: `QA Results (27 tested since Sep 14)`. A carried-over ticket passed on Dev in a previous sprint and never deployed is not this sprint's testing; in Sprint 29 that was 12 of 39 "tested". The Failed / Retested list still reads the whole history, because it answers which tickets are failed right now. Without iteration dates, or under the `All Sprints` filter, every verdict counts as before.
+- Done means Tech Complete, Ready for Release or Done, everywhere: the sprint report, the dashboard's Sprint Overview, My Stats, By Stack and Bug Tracker, and the menu's sprint progress. Tech Complete ships in the release note, and the dashboard alone used three different definitions. The sprint report's Done line shows the split: `Done: 14 (13%) = 6 Tech Complete + 8 Done`.
+- A move the same person reverses within 30 minutes is an undo and is dropped from every report. A misclick to In Progress and straight back used to read as a failure in the standup and as `failed 2×` in the sprint report. A reversal by someone else, or a slower one, stays as two real actions.
+- Standup lines say what the move was. `Verified, ready for release` and `Testing complete` are only printed when the ticket left a QA column; any other move, such as Ready for Dev straight to Tech Complete, or the release step Tech Complete to Ready for Release, prints as `Moved Ready for Dev → Tech Complete`. `Worked on ticket` and `needs confirmation` are gone, since the report cannot know either.
+- The standup lists every ticket the QA touched yesterday, not only the current sprint's. On the first day of a sprint, Friday's tickets still sit in the previous one and were dropped from Monday's report.
+- The bugs section labels its last bucket `Backlog / Blocked`, which is what it has always counted.
+
+### Fixed
+
+- The bug and enhancement form leaves Priority and Stack at `--`. The defaults were written for selectors without `--` in front and became P1 and FE, which also skipped the wait for GitHub's priority automation.
+- Search scrolls its filter panel to keep the option under the cursor visible; on an 80x24 terminal a long filter row put it below the panel's edge.
+- Background sync fetches the timeline of the report sprint's Backlog and Ready for Dev tickets too. Only the Dashboard fetched those, and it silently skipped whenever a sync was in flight, so a ticket filed straight into Ready for Dev counted as "no history data yet" in every report no matter how often you refreshed.
+- Standup picks the most significant QA action of the day and, among equals, the latest, across status moves and label passes together. A label pass was only consulted when no status move existed, so a ticket failed at 17:12 and passed on STG at 17:16 reported as `Failed on STG`, and two passes in one day reported the earlier one.
+- `Issues found` reads who filed the ticket from the timeline - the author gives it its first status and its type label within moments of creation - instead of guessing from the assignees. A bug the QA filed and assigned to two developers was missing; a bug a developer filed and assigned to the QA was claimed. The assignee guess remains only for tickets whose timeline is not fetched yet.
+- A bad `timezone_offset_hours` falls back to UTC instead of panicking in the middle of a report.
+- Report lines stay on one line. Titles carrying an embedded newline or a trailing space (a body pasted into the title field) broke the line in half, so a ticket's status and priority ended up on their own line in Slack.
+
+## v3.2.0 - public release
+
+Shipped in the v3.2.0 tag together with the UAT flow below; listed as Unreleased until 3.3.0. The `U` behaviour described here changed in 3.3.0.
 
 ### Added
 
@@ -16,21 +58,9 @@ All notable changes to git-tui. Versions follow [semantic versioning](https://se
 
 ### Changed
 
-- Every report line names the root of the ticket's sub-issue chain: `[Dave project]` for an epic, `[Issues sprint 29]` for the plain task the QA files bugs under. Only a ticket with no parent at all is tagged `[no parent]`; half of Sprint 29 used to read `[no epic]`, which said nothing about where those tickets belonged. The root is found by walking the sub-issue chain: sync fetches only one parent level, so a ticket hanging off a story reaches its epic through the board, and a parent that is not on the board is named by its synced title. An epic is recognised by the `Epic` label or an `[Epic]` title prefix, because the board uses both.
-- Sprint report gains a `By EPIC / root ticket` rollup - tickets, bugs, how many are in QA and in UAT, and how many were tested, passed and failed per root, epics first and tickets with no parent last under `No parent`. `in QA` uses the Sprint Overview's definition (In QA and In QA - Dev) and In UAT is listed on its own, so the per-root counts add up to the sprint totals.
-- Daily standup reads as three separate things that happened yesterday: `Tested & Verified`, `Failed` and `Issues found`. A ticket QA filed used to appear twice, once as a generic "Worked on ticket (Ready for Dev)" line and again under the bug heading, and a rejection sat in among the passes where the team could miss it.
-- `Issues found` covers bugs and QA-raised enhancements, replacing the bug-only section.
-- Reports say what QA is doing to a ticket: `Testing` for a task, `Verifying` for a bug or an enhancement QA raised. Only the report form's upper-case `[ENHANCEMENT]` title prefix counts as a QA finding - the plain `Enhancement` label is also on dev feature work, which is tested, not verified.
-- New bug reports, enhancements and tasks are filed into the sprint running today, read from the Sprint field's iteration dates. They used to inherit the parent ticket's sprint (falling back to the board's sprint filter), so a bug raised while QAing a carried-over ticket landed in the sprint that ticket came from - and on day one of a sprint, before any item sits in it, everything went to the previous one. The form's `Sprint (auto)` line now shows the same value that gets written.
 - Project fields are read over GraphQL. `gh project field-list` never returned the iteration configuration, so the Sprint field had no options at all and every "inherit the parent's Sprint" write silently found nothing to set.
 - The current sprint is taken from the iteration's real `startDate` and `duration`. The hardcoded date anchor is now only a fallback.
 - QA metrics are derived from the latest QA verdict per ticket, label-only passes included, so `passed + failed = tested` holds by construction. Previously a pass only counted once a ticket reached Tech Complete, which biased the pass rate downwards.
-- QA Results count only verdicts given since the sprint's first day, read from the Sprint field's iteration `startDate`, and the heading says so: `QA Results (27 tested since Sep 14)`. A carried-over ticket passed on Dev in a previous sprint and never deployed is not this sprint's testing; in Sprint 29 that was 12 of 39 "tested". The Failed / Retested list still reads the whole history, because it answers which tickets are failed right now. Without iteration dates, or under the `All Sprints` filter, every verdict counts as before.
-- Done means Tech Complete, Ready for Release or Done, everywhere: the sprint report, the dashboard's Sprint Overview, My Stats, By Stack and Bug Tracker, and the menu's sprint progress. Tech Complete ships in the release note, and the dashboard alone used three different definitions. The sprint report's Done line shows the split: `Done: 14 (13%) = 6 Tech Complete + 8 Done`.
-- A move the same person reverses within 30 minutes is an undo and is dropped from every report. A misclick to In Progress and straight back used to read as a failure in the standup and as `failed 2×` in the sprint report. A reversal by someone else, or a slower one, stays as two real actions.
-- Standup lines say what the move was. `Verified, ready for release` and `Testing complete` are only printed when the ticket left a QA column; any other move, such as Ready for Dev straight to Tech Complete, or the release step Tech Complete to Ready for Release, prints as `Moved Ready for Dev → Tech Complete`. `Worked on ticket` and `needs confirmation` are gone, since the report cannot know either.
-- The standup lists every ticket the QA touched yesterday, not only the current sprint's. On the first day of a sprint, Friday's tickets still sit in the previous one and were dropped from Monday's report.
-- The bugs section labels its last bucket `Backlog / Blocked`, which is what it has always counted.
 - "Failed" now means QA failed it. It is read from QA events rather than the current column, so a ticket parked in Backlog is no longer counted as a QA failure.
 - The In QA figure is split into `to test`, `bugs to verify` and `waiting for deploy`, so reports and My Tasks agree.
 - `Fail` is only offered from a QA column, on every screen, because it moves the parent ticket.
@@ -42,11 +72,6 @@ All notable changes to git-tui. Versions follow [semantic versioning](https://se
 
 ### Fixed
 
-- Background sync fetches the timeline of the report sprint's Backlog and Ready for Dev tickets too. Only the Dashboard fetched those, and it silently skipped whenever a sync was in flight, so a ticket filed straight into Ready for Dev counted as "no history data yet" in every report no matter how often you refreshed.
-- Standup picks the most significant QA action of the day and, among equals, the latest, across status moves and label passes together. A label pass was only consulted when no status move existed, so a ticket failed at 17:12 and passed on STG at 17:16 reported as `Failed on STG`, and two passes in one day reported the earlier one.
-- `Issues found` reads who filed the ticket from the timeline - the author gives it its first status and its type label within moments of creation - instead of guessing from the assignees. A bug the QA filed and assigned to two developers was missing; a bug a developer filed and assigned to the QA was claimed. The assignee guess remains only for tickets whose timeline is not fetched yet.
-- A bad `timezone_offset_hours` falls back to UTC instead of panicking in the middle of a report.
-- Report lines stay on one line. Titles carrying an embedded newline or a trailing space (a body pasted into the title field) broke the line in half, so a ticket's status and priority ended up on their own line in Slack.
 - Retest loop: `Return` and `Fail` now remove the `Ready-for-Staging` and `Ready-for-UAT` labels they added. A ticket coming back for retest kept them, which hid it from My Tasks and made the next pass refuse with "already passed".
 - GitHub's native issue type and sub-issue links are actually applied. Both mutations were handed the project item ID (`PVTI_...`) instead of the issue node ID (`I_kw...`), and both errors were discarded.
 - Item detail loads while a background sync is running. The automatic fetch shared its channel with the sync, whose timeline workers hold it open long after the item list arrives, so opening a ticket reported a load that never resolved and moving to another ticket dropped the previous one.

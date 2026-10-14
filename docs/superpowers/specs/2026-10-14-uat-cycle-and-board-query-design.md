@@ -1,7 +1,8 @@
 # UAT cycle and board query (v3.3.0)
 
 Date: 2026-10-14
-Status: draft for review
+Status: implemented (checkpoints below); deviations from the first draft are
+written into the sections they change
 
 ## Why
 
@@ -88,17 +89,23 @@ For each merged PR, for each environment branch, on a worker thread:
 Never print "not deployed" for `?`: a cherry-picked or bundled change is
 common, and saying "not deployed" when the code is live would mislead.
 
-Environment branches come from a new config field with defaults:
+Environment branches come from a new config field with defaults (a list, so
+the column order is kept):
 
 ```json
-"deploy_branches": { "Dev": "develop", "STG": "staging", "UAT": "uat", "Prod": "production" }
+"deploy_branches": [
+  { "env": "Dev", "branch": "develop" }, { "env": "STG", "branch": "staging" },
+  { "env": "UAT", "branch": "uat" }, { "env": "Prod", "branch": "production" }
+]
 ```
 
 All five main code repositories have these four branches (checked
 2026-10-14). Results are kept in memory for the session, keyed by
 `repo#number`, so the Move to In UAT list can show them.
 
-Open and closed-unmerged PRs are listed but not checked.
+Open and closed-unmerged PRs are listed but not checked. A ticket whose PRs
+were looked up and none found shows "none linked on GitHub": GitHub only links
+a PR that closes, mentions or was linked to the issue (#4218, Oct 12, had none).
 
 ### Pass UAT (`U`): one ticket
 
@@ -107,7 +114,8 @@ Same shape as Pass Dev and Pass STG. Guard: the ticket is In UAT. Execution:
 1. Re-read the live Status; abort and correct the board if it left In UAT.
 2. Set Status to Tech Complete.
 3. Comment `Verified on UAT. Moving to Tech Complete.`, cc the devs.
-4. Slack: one "Verified on UAT" message (toggle `pass_uat`).
+4. Slack: one `✅ [Ready for release] Verified on UAT` message listing the
+   ticket (toggle `pass_uat`).
 
 ### Bulk verify UAT (`V`)
 
@@ -199,8 +207,9 @@ Search can't use letter keys (they type into the query), so:
 Stored in `config.json` as `search_presets` (default empty, so older configs
 load unchanged). Sprint filter values equal to the current, previous or next
 sprint are saved as `@current`, `@previous`, `@next` and resolved again on
-load, so "In QA, this sprint" stays correct next sprint. A preset sprint or
-EPIC that no longer exists is dropped on load with a status-bar note.
+load, so "In QA, this sprint" stays correct next sprint. A token that no
+longer resolves is dropped on load with a status-bar note; every other stored
+value, EPIC included, is applied as saved.
 
 ### Copy results (`Ctrl+Y`)
 
@@ -213,12 +222,10 @@ Markdown:
 - [#4224 [FE] Copy changes in Activity Library](https://github.com/Kinatico/kup-project-management/issues/4224) - In QA, Sprint 31, @vxtien-qa
 ```
 
-Slack (titles escaped the way the reports escape them; names from the Slack
-user map, logins otherwise):
-
-```
-• <https://github.com/Kinatico/kup-project-management/issues/4224|#4224 [FE] Copy changes in Activity Library> - In QA, Sprint 31, @Bruce Vu
-```
+Slack: rich text (HTML) with each title linked, plus a plain-text fallback
+with the URL at the end of each line; names from the Slack user map, logins
+otherwise. Not `<url|text>`: that markup only works through the Slack API and
+shows literally when a person pastes it into the message box.
 
 Clipboard failures are reported, not hidden.
 
@@ -253,6 +260,9 @@ Every key above must appear in all of:
 
 The QA Actions menu text for `U` changes from "moves all N In UAT tickets" to
 the single-ticket wording.
+
+The QA Actions menu drops to one line per action when the terminal is too
+short for two, so its last rows and the way out stay on screen.
 
 ## UI verification
 
