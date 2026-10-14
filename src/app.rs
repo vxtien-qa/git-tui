@@ -241,6 +241,23 @@ pub enum ConfirmAction {
     Quit,
 }
 
+impl Popup {
+    /// A popup waiting on the user - a confirm, a prompt, a pick list - as
+    /// opposed to a result message. A background result must not replace
+    /// one: the pending decision would vanish, and the Enter meant for it
+    /// would dismiss the result instead.
+    pub fn is_interactive(&self) -> bool {
+        matches!(
+            self,
+            Popup::Confirm { .. }
+                | Popup::ConfirmSprint { .. }
+                | Popup::SavePreset { .. }
+                | Popup::Presets { .. }
+                | Popup::CopyResults
+        )
+    }
+}
+
 /// One sprint option when sending a ticket back (Fail, Return).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SprintChoice {
@@ -326,8 +343,14 @@ pub enum ActionResult {
         comments: Vec<crate::models::item::Comment>,
         labels: Vec<String>,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
-        /// `None` when the lookup failed, so a failure keeps what was shown.
-        linked_prs: Option<Vec<crate::models::item::LinkedPr>>,
+        /// `None` when there is nothing to look up (a pull request card);
+        /// `Err` when the lookup failed, which keeps what was shown.
+        linked_prs: Option<Result<Vec<crate::models::item::LinkedPr>, String>>,
+    },
+    /// A ticket's Sprint field was written on GitHub.
+    SprintChanged {
+        item_id: String,
+        sprint: String,
     },
     /// Deploy check results for one ticket's merged PRs, by PR URL.
     DeployChecked {
@@ -520,6 +543,9 @@ pub struct App {
     /// Items whose linked PRs have been looked up this session, so an empty
     /// list reads as "none linked" rather than "not loaded yet".
     pub linked_prs_loaded: std::collections::HashSet<String>,
+    /// Items whose linked-PR lookup failed, with the error, until a reload
+    /// succeeds.
+    pub linked_prs_failed: std::collections::HashMap<String, String>,
     /// Deploy check results by PR URL: (environment, state) in
     /// `config.deploy_branches` order. Kept for the session, across syncs.
     pub deploy_checks:
@@ -645,6 +671,7 @@ impl App {
             running: true,
             detail_fetch_inflight: std::collections::HashSet::new(),
             linked_prs_loaded: std::collections::HashSet::new(),
+            linked_prs_failed: std::collections::HashMap::new(),
             batch_rows: Vec::new(),
             batch_cursor: 0,
             deploy_checks: std::collections::HashMap::new(),
@@ -2316,6 +2343,54 @@ mod tests {
         assert_eq!(app.uat_deploy_state(&item), Some(Unknown));
         app.deploy_checks.insert("b".into(), env(Missing));
         assert_eq!(app.uat_deploy_state(&item), Some(Missing));
+    }
+
+    #[test]
+    fn test_only_pending_decisions_are_interactive() {
+        assert!(Popup::CopyResults.is_interactive());
+        assert!(Popup::Presets { selected: 0 }.is_interactive());
+        assert!(Popup::SavePreset {
+            name: String::new()
+        }
+        .is_interactive());
+        assert!(Popup::ConfirmSprint {
+            title: String::new(),
+            message: String::new(),
+            choices: Vec::new(),
+            selected: 0,
+            on_confirm: ConfirmAction::Quit,
+        }
+        .is_interactive());
+        assert!(!Popup::Success("done".into()).is_interactive());
+        assert!(!Popup::Error("x".into()).is_interactive());
+        assert!(!Popup::None.is_interactive());
+    }
+
+    #[test]
+    fn test_paste_goes_to_the_name_prompt_not_the_search_behind_it() {
+        let mut app = App::new();
+        app.screen = Screen::Search;
+        app.popup = Popup::SavePreset {
+            name: "In QA ".into(),
+        };
+        crate::handlers::screens::handle_paste(&mut app, "mine\n");
+        assert_eq!(
+            app.popup,
+            Popup::SavePreset {
+                name: "In QA mine".into()
+            }
+        );
+        assert!(app.search_query.is_empty());
+
+        // Any other popup swallows the paste.
+        app.popup = Popup::CopyResults;
+        crate::handlers::screens::handle_paste(&mut app, "text");
+        assert!(app.search_query.is_empty());
+
+        // No popup: the keyword box gets it, as before.
+        app.popup = Popup::None;
+        crate::handlers::screens::handle_paste(&mut app, "copy");
+        assert_eq!(app.search_query, "copy");
     }
 
     #[test]

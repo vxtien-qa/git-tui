@@ -63,6 +63,9 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     )));
     lines.push(Line::from(""));
 
+    // The toggles outgrew an 80x24 terminal: remember where the cursor's
+    // row lands so the panel can scroll to it.
+    let first_toggle_line = lines.len();
     for (i, label) in SlackNotifyConfig::LABELS.iter().enumerate() {
         let enabled = app.config.slack_notify.get(i);
         let is_selected = i == app.slack_notify_cursor;
@@ -114,7 +117,17 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         .border_style(theme::border())
         .title(Span::styled(" Notification Settings ", theme::title()));
 
-    f.render_widget(Paragraph::new(lines).block(block), chunks[0]);
+    let inner_h = chunks[0].height.saturating_sub(2) as usize;
+    let cursor_line = first_toggle_line + app.slack_notify_cursor;
+    let scroll = if inner_h > 0 && cursor_line >= inner_h {
+        (cursor_line + 1 - inner_h) as u16
+    } else {
+        0
+    };
+    f.render_widget(
+        Paragraph::new(lines).block(block).scroll((scroll, 0)),
+        chunks[0],
+    );
 
     // Footer
     let footer = super::utils::footer_line(

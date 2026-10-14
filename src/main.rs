@@ -391,7 +391,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             // Result popups must not clobber an open Confirm popup (that would
             // silently discard the user's pending confirmation) - route the
             // message to the status bar instead.
-            let confirm_open = matches!(app.popup, Popup::Confirm { .. });
+            let confirm_open = app.popup.is_interactive();
             match result {
                 crate::app::ActionResult::Success(msg) => {
                     if confirm_open {
@@ -437,6 +437,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 crate::app::ActionResult::ParentStatusChanged { item_id, status } => {
                     if let Some(item) = app.items.iter_mut().find(|i| i.id == item_id) {
                         item.status = status;
+                    }
+                }
+                crate::app::ActionResult::SprintChanged { item_id, sprint } => {
+                    if let Some(item) = app.items.iter_mut().find(|i| i.id == item_id) {
+                        item.sprint = Some(sprint);
                     }
                 }
                 crate::app::ActionResult::RemoveLabelLocal { item_id, label } => {
@@ -549,6 +554,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         .unwrap_or_default();
                     if failures.is_empty() {
                         app.set_status(&format!("Deploy check {}: {}", label, summary));
+                    } else if confirm_open {
+                        app.set_status(&format!(
+                            "Deploy check {} could not finish: {}",
+                            label,
+                            failures.join("; ")
+                        ));
                     } else {
                         app.popup = Popup::Error(format!(
                             "Deploy check {} could not finish:\n{}",
@@ -577,9 +588,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         if created_at.is_some() {
                             item.created_at = created_at;
                         }
-                        if let Some(prs) = linked_prs {
-                            item.linked_prs = prs;
-                            app.linked_prs_loaded.insert(item_id.clone());
+                        match linked_prs {
+                            Some(Ok(prs)) => {
+                                item.linked_prs = prs;
+                                app.linked_prs_loaded.insert(item_id.clone());
+                                app.linked_prs_failed.remove(&item_id);
+                            }
+                            Some(Err(e)) => {
+                                app.linked_prs_failed.insert(item_id.clone(), e);
+                            }
+                            None => {}
                         }
                         app.set_status(&format!(
                             "Loaded: {} comment{}",
@@ -1722,7 +1740,11 @@ mod snapshot_tool {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
             }
-            "slack-notify" => app.screen = Screen::SlackNotifyConfig,
+            "slack-notify" => {
+                app.screen = Screen::SlackNotifyConfig;
+                // The last toggle, which used to sit below an 80x24 panel.
+                app.slack_notify_cursor = crate::config::SlackNotifyConfig::LABELS.len() - 1;
+            }
             "search-copy" => {
                 app.screen = Screen::Search;
                 app.filter_status = vec!["In QA".to_string()];

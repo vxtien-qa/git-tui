@@ -90,7 +90,20 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
     }
 
     // ─── Linked PRs ───
-    if item.linked_prs.is_empty() && app.linked_prs_loaded.contains(&item.id) {
+    if let Some(e) = app.linked_prs_failed.get(&item.id) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  -- Linked PRs: could not load (r to retry) --",
+            theme::warning(),
+        )));
+        let err_w = (area.width.saturating_sub(8) as usize).max(20);
+        for part in super::utils::word_wrap(e, err_w).into_iter().take(2) {
+            lines.push(Line::from(Span::styled(
+                format!("    {}", part),
+                theme::dim(),
+            )));
+        }
+    } else if item.linked_prs.is_empty() && app.linked_prs_loaded.contains(&item.id) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  -- Linked PRs: none linked on GitHub --",

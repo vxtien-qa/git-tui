@@ -265,6 +265,21 @@ pub fn activate_menu_item(app: &mut App, idx: usize) {
 pub fn handle_paste(app: &mut App, text: &str) {
     let clean = text.replace("\r\n", "\n").replace('\r', "\n");
     let one_line = clean.replace('\n', " ");
+    // A popup on top owns the keyboard, so it owns a paste too: the name
+    // prompt takes it, any other popup ignores it rather than letting it
+    // land in the screen underneath.
+    if let Popup::SavePreset { name } = &mut app.popup {
+        for c in one_line.trim().chars() {
+            if name.chars().count() >= 40 {
+                break;
+            }
+            name.push(c);
+        }
+        return;
+    }
+    if app.popup != Popup::None {
+        return;
+    }
     match app.screen.clone() {
         Screen::Comment(_) => {
             app.comment_discard_armed = false;

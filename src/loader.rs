@@ -501,7 +501,15 @@ pub fn fetch_item_detail(app: &mut App, item_idx: usize) {
     app.detail_fetch_inflight.insert(item_id.clone());
     app.loading = true;
     app.set_status(&format!("Fetching #{} from {}...", number, repo));
-    spawn_detail_fetch_action(app.action_tx.clone(), item_id, number, repo, false);
+    let is_issue = is_issue(app, item_idx);
+    spawn_detail_fetch_action(
+        app.action_tx.clone(),
+        item_id,
+        number,
+        repo,
+        is_issue,
+        false,
+    );
 }
 
 /// Check where a ticket's merged PRs are deployed (`d` in Item Detail).
@@ -517,6 +525,20 @@ pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
         .number
         .map(|n| format!("#{}", n))
         .unwrap_or_else(|| "this ticket".to_string());
+    if item.content_type == crate::models::item::ContentType::PullRequest {
+        app.set_status(&format!(
+            "{} is a pull request card - open the ticket it belongs to and press d there",
+            label
+        ));
+        return;
+    }
+    if let Some(e) = app.linked_prs_failed.get(&item.id) {
+        app.set_status(&format!(
+            "Linked PRs could not be loaded ({}) - press r to reload",
+            e
+        ));
+        return;
+    }
     if !app.linked_prs_loaded.contains(&item.id) {
         app.set_status("Linked PRs are still loading - try again in a moment");
         return;
@@ -612,7 +634,8 @@ pub fn force_fetch_item_detail(app: &mut App, item_idx: usize) {
 
     // Explicit reload also re-reads the live Status, which is why it is worth
     // the extra call here but not on every ticket the user opens.
-    spawn_detail_fetch_action(tx, item_id, number, repo, true);
+    let is_issue = is_issue(app, item_idx);
+    spawn_detail_fetch_action(tx, item_id, number, repo, is_issue, true);
 }
 
 /// Resolve number/repo into usable values, or set placeholder body and return None.
@@ -655,18 +678,37 @@ fn resolve_detail_params(
 /// This is the user-initiated Reload path, so it also refetches the live
 /// project Status (`gh issue view` can't return it - it's a project field,
 /// and without this the reload appeared to "not work" for status changes).
+/// Whether the card is an issue - the only kind with linked PRs to read.
+fn is_issue(app: &App, item_idx: usize) -> bool {
+    app.items
+        .get(item_idx)
+        .is_some_and(|i| i.content_type == crate::models::item::ContentType::Issue)
+}
+
 fn spawn_detail_fetch_action(
     tx: std::sync::mpsc::Sender<crate::app::ActionResult>,
     item_id: String,
     number: u32,
     repo: String,
+    is_issue: bool,
     refresh_status: bool,
 ) {
     std::thread::spawn(move || {
+        // The linked-PR lookup runs beside the issue fetch: it is a second
+        // round trip of about the same length, and in series it doubled the
+        // time to open a ticket.
+        let prs = is_issue.then(|| {
+            let repo = repo.clone();
+            std::thread::spawn(move || {
+                gh::issue::linked_prs(&repo, number).map_err(|e| e.to_string())
+            })
+        });
         let (body, comments, labels, created_at) = do_fetch_detail(number, &repo);
-        // Fails for a PR on the board (it is not an issue) - that just means
-        // no linked PRs to show.
-        let linked_prs = gh::issue::linked_prs(&repo, number).ok();
+        let linked_prs = prs.map(|worker| {
+            worker
+                .join()
+                .unwrap_or_else(|_| Err("linked-PR lookup crashed".to_string()))
+        });
 
         if refresh_status {
             if let Ok(Some(remote)) = gh::item::get_item_status(&item_id) {
@@ -819,6 +861,57 @@ pub fn extract_media_from_body(body: &str) -> Vec<crate::models::item::MediaItem
 
 #[cfg(test)]
 mod tests {
+
+    fn app_with_issue(content_type: crate::models::item::ContentType) -> App {
+        let mut app = App::new();
+        app.items = vec![crate::models::item::Item {
+            id: "PVTI_1".into(),
+            number: Some(4019),
+            repository: Some("Org/board".into()),
+            content_type,
+            ..Default::default()
+        }];
+        app
+    }
+
+    #[test]
+    fn test_deploy_check_explains_why_it_cannot_run() {
+        use crate::models::item::ContentType;
+        // A pull request card has no linked PRs to read.
+        let mut app = app_with_issue(ContentType::PullRequest);
+        spawn_deploy_check(&mut app, 0);
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("pull request card"));
+        assert!(app.deploy_check_inflight.is_empty());
+
+        // A failed lookup says so and points at reload, instead of "still
+        // loading" forever.
+        let mut app = app_with_issue(ContentType::Issue);
+        app.linked_prs_failed
+            .insert("PVTI_1".into(), "HTTP 502".into());
+        spawn_deploy_check(&mut app, 0);
+        let msg = app.status_message.clone().unwrap_or_default();
+        assert!(
+            msg.contains("could not be loaded") && msg.contains("HTTP 502"),
+            "{}",
+            msg
+        );
+
+        // Looked up, nothing linked.
+        let mut app = app_with_issue(ContentType::Issue);
+        app.linked_prs_loaded.insert("PVTI_1".into());
+        spawn_deploy_check(&mut app, 0);
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("no PRs linked"));
+        assert!(app.deploy_check_inflight.is_empty());
+    }
+
     use super::*;
 
     #[test]

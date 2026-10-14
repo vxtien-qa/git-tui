@@ -354,6 +354,12 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                         }
                     }
                     if let Err(e) = gh::item::edit_field(&t.item_id, &pid, &field_id, &option_id) {
+                        // Undo the optimistic Tech Complete, or the guard
+                        // refuses a retry until the next sync.
+                        let _ = tx.send(crate::app::ActionResult::ParentStatusChanged {
+                            item_id: t.item_id.clone(),
+                            status: Status::InUAT,
+                        });
                         failed.push(format!("#{}: {}", t.number, e));
                         continue;
                     }
@@ -1125,9 +1131,11 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                         )) = parent_fail_info
                         {
                             // Bug exists - now move the parent back to In Progress.
+                            let mut parent_moved = false;
                             if let Some((pitem_id, pid, fid, oid)) = move_params {
                                 match gh::item::edit_field(&pitem_id, &pid, &fid, &oid) {
                                     Ok(_) => {
+                                        parent_moved = true;
                                         let _ = tx.send(
                                             crate::app::ActionResult::ParentStatusChanged {
                                                 item_id: pitem_id,
@@ -1159,7 +1167,16 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                             }
 
                             let mut moving = "Moving back to In Progress.".to_string();
-                            if let Some(m) = &parent_sprint_move {
+                            // Only a parent that really went back changes sprint.
+                            if !parent_moved {
+                                if let Some(m) = &parent_sprint_move {
+                                    warnings.push(format!(
+                                        "✗ Parent not moved to {}: its move to In Progress did not happen",
+                                        m.name
+                                    ));
+                                }
+                            }
+                            if let Some(m) = parent_sprint_move.as_ref().filter(|_| parent_moved) {
                                 match gh::item::edit_iteration_field(
                                     &parent_item_id,
                                     &m.project_id,
@@ -1167,6 +1184,10 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                                     &m.option_id,
                                 ) {
                                     Ok(()) => {
+                                        let _ = tx.send(crate::app::ActionResult::SprintChanged {
+                                            item_id: parent_item_id.clone(),
+                                            sprint: m.name.clone(),
+                                        });
                                         moving =
                                             format!("Moving back to In Progress and to {}.", m.name)
                                     }
@@ -1574,18 +1595,8 @@ fn handle_return_action(
         }
     };
     let dev_mentions: Vec<String> = devs.iter().map(|d| format!("@{}", d)).collect();
-    // Wording works for bug tickets and feature tickets alike.
-    let comment = comment_with_cc(
-        &match &sprint_move {
-            Some(m) => format!(
-                "QA verification failed - issue not resolved. Returning to In Progress and moving to {}.",
-                m.name
-            ),
-            None => "QA verification failed - issue not resolved. Returning to In Progress."
-                .to_string(),
-        },
-        &dev_mentions.join(" "),
-    );
+    // The comment is written in the worker, once it knows whether the sprint
+    // move worked: it must not announce a move that did not happen.
 
     let slack_devs = devs;
 
@@ -1608,9 +1619,6 @@ fn handle_return_action(
     // Optimistic local move (reverted via ParentStatusChanged on abort).
     if let Some(item) = app.items.get_mut(item_idx) {
         item.status = Status::InProgress;
-        if let Some(m) = &sprint_move {
-            item.sprint = Some(m.name.clone());
-        }
     }
 
     let tx = app.action_tx.clone();
@@ -1643,16 +1651,30 @@ fn handle_return_action(
         let (cleared, clear_failed) =
             strip_handoff_labels(&tx, &item_id, &repo, number, &stale_labels);
         let mut label_note = handoff_note(&cleared, &clear_failed);
+        // Wording works for bug tickets and feature tickets alike.
+        let mut body =
+            "QA verification failed - issue not resolved. Returning to In Progress.".to_string();
         if let Some(m) = &sprint_move {
             match gh::item::edit_iteration_field(&item_id, &m.project_id, &m.field_id, &m.option_id)
             {
-                Ok(()) => label_note.push_str(&format!(", ✓ moved to {}", m.name)),
+                Ok(()) => {
+                    let _ = tx.send(crate::app::ActionResult::SprintChanged {
+                        item_id: item_id.clone(),
+                        sprint: m.name.clone(),
+                    });
+                    body = format!(
+                        "QA verification failed - issue not resolved. Returning to In Progress and moving to {}.",
+                        m.name
+                    );
+                    label_note.push_str(&format!(", ✓ moved to {}", m.name));
+                }
                 Err(e) => label_note.push_str(&format!(
                     ", ✗ could not move to {} ({}) - set the Sprint on GitHub",
                     m.name, e
                 )),
             }
         }
+        let comment = comment_with_cc(&body, &dev_mentions.join(" "));
 
         match gh::issue::comment(&repo, number, &comment) {
             Ok(()) => {
@@ -1683,9 +1705,9 @@ fn handle_return_action(
             }
             Err(e) => {
                 let _ = tx.send(crate::app::ActionResult::Error(format!(
-                "Return: ✗ Comment failed: {}\nThe status move was still applied - comment manually or retry.",
-                e
-            )));
+                    "Return: ✗ Comment failed: {}\nThe status move was still applied{} - comment manually or retry.",
+                    e, label_note
+                )));
             }
         }
     });
