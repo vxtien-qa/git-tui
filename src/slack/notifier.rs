@@ -125,13 +125,43 @@ pub struct ReleaseItem {
     pub title: String,
 }
 
-/// Send the aggregated "cleared UAT regression, ready for release" message.
+/// What a message about a set of tickets announces: `✅ *[Ready for
+/// release]* 3 ticket(s) cleared UAT regression by Bruce`, then one line per
+/// ticket and the CC.
+pub struct BatchNotice {
+    pub emoji: &'static str,
+    pub tag: &'static str,
+    pub headline: String,
+}
+
+impl BatchNotice {
+    /// A UAT regression run passed `n` tickets.
+    pub fn regression_cleared(n: usize) -> Self {
+        BatchNotice {
+            emoji: "✅",
+            tag: "Ready for release",
+            headline: format!("{} ticket(s) cleared UAT regression", n),
+        }
+    }
+
+    /// One ticket verified on UAT on its own.
+    pub fn verified_on_uat() -> Self {
+        BatchNotice {
+            emoji: "✅",
+            tag: "Ready for release",
+            headline: "Verified on UAT".to_string(),
+        }
+    }
+}
+
+/// Send one message about a set of tickets.
 ///
 /// One message for the whole batch instead of one per ticket: a regression run
 /// covers everything currently deployed to UAT, so fifteen separate pings say
 /// less than one list and bury the channel.
-pub fn notify_release_ready(
+pub fn notify_batch(
     webhook_url: &str,
+    notice: &BatchNotice,
     user: &str,
     items: &[ReleaseItem],
     devs: &[String],
@@ -139,11 +169,28 @@ pub fn notify_release_ready(
 ) -> anyhow::Result<()> {
     webhook::send_message(
         webhook_url,
-        &format_release_ready(user, items, devs, user_map),
+        &format_batch(notice, user, items, devs, user_map),
     )
 }
 
+#[cfg(test)]
 fn format_release_ready(
+    user: &str,
+    items: &[ReleaseItem],
+    devs: &[String],
+    user_map: &HashMap<String, SlackUserMapping>,
+) -> String {
+    format_batch(
+        &BatchNotice::regression_cleared(items.len()),
+        user,
+        items,
+        devs,
+        user_map,
+    )
+}
+
+fn format_batch(
+    notice: &BatchNotice,
     user: &str,
     items: &[ReleaseItem],
     devs: &[String],
@@ -158,10 +205,7 @@ fn format_release_ready(
             .unwrap_or_else(|| user.to_string())
     };
 
-    let mut msg = format!(
-        "✅ *[Ready for release]* {} ticket(s) cleared UAT regression",
-        items.len()
-    );
+    let mut msg = format!("{} *[{}]* {}", notice.emoji, notice.tag, notice.headline);
     if !actor.is_empty() {
         msg.push_str(&format!(" by {}", webhook::escape_mrkdwn(&actor)));
     }
@@ -324,6 +368,25 @@ mod tests {
         assert!(msg.contains("<https://github.com/Org/repo/issues/401|#401> Fix login"));
         assert!(msg.contains("<https://github.com/Org/repo/issues/402|#402> Fix logout"));
         assert!(msg.contains("CC: <@U111>"));
+    }
+
+    #[test]
+    fn test_single_uat_pass_says_verified_not_regression() {
+        let items = vec![ReleaseItem {
+            number: Some(4019),
+            repo: Some("Kinatico/kup-project-management".into()),
+            title: "Search body".into(),
+        }];
+        let msg = format_batch(
+            &BatchNotice::verified_on_uat(),
+            "",
+            &items,
+            &[],
+            &HashMap::new(),
+        );
+        assert!(msg.starts_with("✅ *[Ready for release]* Verified on UAT\n"));
+        assert!(!msg.contains("regression"));
+        assert!(msg.contains("4019"));
     }
 
     #[test]

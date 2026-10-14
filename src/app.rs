@@ -36,6 +36,23 @@ pub enum Screen {
     History(usize), // item index
     Help,
     StackLeadsEdit,
+    /// Pick tickets for a batch action; rows live in `App::batch_rows`.
+    BatchPicker(BatchKind),
+}
+
+/// What a batch pick list is choosing tickets for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BatchKind {
+    /// Pass a UAT regression run: In UAT tickets to Tech Complete.
+    VerifyUat,
+}
+
+impl BatchKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            BatchKind::VerifyUat => "Bulk verify UAT",
+        }
+    }
 }
 
 impl Screen {
@@ -75,6 +92,7 @@ impl Screen {
             Screen::BugReport(_, false) => "New bug".to_string(),
             Screen::TaskForm(_) => "New task".to_string(),
             Screen::AssigneePicker(_) => "Assignees".to_string(),
+            Screen::BatchPicker(kind) => kind.title().to_string(),
         }
     }
 }
@@ -173,11 +191,12 @@ pub enum Popup {
 pub enum ConfirmAction {
     PassDev(usize),
     PassStg(usize),
-    /// UAT is a regression pass over everything currently deployed there, so
-    /// the action covers the whole In UAT column, not just the ticket it was
-    /// triggered from.
+    /// Move In UAT tickets to Tech Complete, comment on each and send one
+    /// Slack message. `bulk` is a regression run picked in Bulk verify UAT;
+    /// otherwise it is the one ticket `U` was pressed on.
     PassUat {
         indices: Vec<usize>,
+        bulk: bool,
     },
     Return(usize),
     MoveItems {
@@ -450,6 +469,10 @@ pub struct App {
     /// a time. Keyed by ID, so a refresh reordering `items` cannot make the
     /// result land on the wrong ticket.
     pub detail_fetch_inflight: std::collections::HashSet<String>,
+    /// Rows of the batch pick list: (item id, checked). By id, so a refresh
+    /// reordering `items` can't check a different ticket.
+    pub batch_rows: Vec<(String, bool)>,
+    pub batch_cursor: usize,
     /// Items whose linked PRs have been looked up this session, so an empty
     /// list reads as "none linked" rather than "not loaded yet".
     pub linked_prs_loaded: std::collections::HashSet<String>,
@@ -578,6 +601,8 @@ impl App {
             running: true,
             detail_fetch_inflight: std::collections::HashSet::new(),
             linked_prs_loaded: std::collections::HashSet::new(),
+            batch_rows: Vec::new(),
+            batch_cursor: 0,
             deploy_checks: std::collections::HashMap::new(),
             deploy_check_inflight: std::collections::HashSet::new(),
         }
@@ -705,6 +730,31 @@ impl App {
     /// Search filter rows below the keyword box: Status, Priority, Stack,
     /// Sprint, Label, EPIC, Assignee.
     pub const SEARCH_FILTER_ROWS: usize = 7;
+
+    /// Open the batch pick list over `candidates` (item indices), checking
+    /// the ones `checked` says.
+    pub fn open_batch_picker(
+        &mut self,
+        kind: BatchKind,
+        candidates: &[usize],
+        checked: impl Fn(usize) -> bool,
+    ) {
+        self.batch_rows = candidates
+            .iter()
+            .filter_map(|&i| self.items.get(i).map(|it| (it.id.clone(), checked(i))))
+            .collect();
+        self.batch_cursor = 0;
+        self.goto(Screen::BatchPicker(kind));
+    }
+
+    /// Item indices of the checked rows that are still on the board.
+    pub fn batch_checked_indices(&self) -> Vec<usize> {
+        self.batch_rows
+            .iter()
+            .filter(|(_, checked)| *checked)
+            .filter_map(|(id, _)| self.items.iter().position(|i| &i.id == id))
+            .collect()
+    }
 
     /// One line on where a ticket's merged PRs are, for the status bar:
     /// `#4019 UAT: 2/2 in · Prod: 1/2 in, 1 ?`. Empty when nothing was checked.

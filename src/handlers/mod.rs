@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod batch;
 pub mod board;
 pub mod detail;
 pub mod helpers;

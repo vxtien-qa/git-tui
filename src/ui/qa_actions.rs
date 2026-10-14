@@ -31,7 +31,7 @@ fn actions_for(app: &App, item_idx: usize) -> Vec<Action> {
     let has_staging = app.item_has_label(item_idx, "Ready-for-Staging");
     let has_uat = app.item_has_label(item_idx, "Ready-for-UAT");
     let in_qa_column = matches!(status, Status::InQADev | Status::InQA | Status::InUAT);
-    // Pass UAT covers the whole regression batch, so say how big it is.
+    // Bulk verify picks from the In UAT column, so say how big it is.
     let uat_batch = app.items_in_column(&Status::InUAT).len().max(1);
 
     let wrong_column = |expected: &str| Some(format!("needs {}", expected));
@@ -62,14 +62,18 @@ fn actions_for(app: &App, item_idx: usize) -> Vec<Action> {
         Action {
             key: "U",
             name: "Pass UAT",
-            effect: if uat_batch > 1 {
-                format!(
-                    "regression clear: moves all {} In UAT tickets to Tech Complete, one Slack release summary",
-                    uat_batch
-                )
-            } else {
-                "regression clear: moves to Tech Complete + Slack release summary".to_string()
-            },
+            effect: "this ticket to Tech Complete + comment, one Slack message".to_string(),
+            available: status == Status::InUAT,
+            blocked_reason: wrong_column("In UAT"),
+        },
+        Action {
+            key: "V",
+            name: "Bulk verify UAT",
+            effect: format!(
+                "pick from the {} In UAT ticket(s) in {} and pass them together",
+                uat_batch,
+                app.board_sprint_filter.as_deref().unwrap_or("all sprints")
+            ),
             available: status == Status::InUAT,
             blocked_reason: wrong_column("In UAT"),
         },
@@ -103,6 +107,17 @@ fn actions_for(app: &App, item_idx: usize) -> Vec<Action> {
             blocked_reason: Some("no handoff label on this item".to_string()),
         },
     ]
+}
+
+/// What an action does, or why it does not apply here.
+fn action_detail(a: &Action) -> String {
+    if a.available {
+        a.effect.clone()
+    } else {
+        a.blocked_reason
+            .clone()
+            .unwrap_or_else(|| "not available".to_string())
+    }
 }
 
 /// Render the QA Actions popup.
@@ -139,24 +154,41 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize) {
     ]));
     lines.push(Line::from(""));
 
+    // Two lines per action (name, then what it does) when the terminal is
+    // tall enough; one line each otherwise, so the bottom rows and the way
+    // out never fall off a short terminal.
+    let full_h = actions
+        .iter()
+        .map(|a| 1 + super::utils::word_wrap(&action_detail(a), inner_w.saturating_sub(8)).len())
+        .sum::<usize>()
+        + 7; // header, blanks, the extra-keys row, footer, border
+    let compact = full_h > f.area().height.saturating_sub(2) as usize;
+
     for a in &actions {
         let (key_style, name_style) = if a.available {
             (theme::highlight(), theme::normal())
         } else {
             (theme::dim(), theme::dim())
         };
+        let detail = action_detail(a);
+        let detail_style = if a.available {
+            theme::dim()
+        } else {
+            theme::warning()
+        };
+        if compact {
+            let room = inner_w.saturating_sub(6 + 22);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  [{}] ", a.key), key_style),
+                Span::styled(format!("{:<22}", a.name), name_style),
+                Span::styled(super::utils::trunc(&detail, room), detail_style),
+            ]));
+            continue;
+        }
         lines.push(Line::from(vec![
             Span::styled(format!("  [{}] ", a.key), key_style),
             Span::styled(format!("{:<22}", a.name), name_style),
         ]));
-
-        let detail = if a.available {
-            a.effect.clone()
-        } else {
-            a.blocked_reason
-                .clone()
-                .unwrap_or_else(|| "not available".to_string())
-        };
         // Indent-wrapped so a long reason never spills out of the popup.
         for (i, chunk) in super::utils::word_wrap(&detail, inner_w.saturating_sub(8))
             .into_iter()
@@ -165,11 +197,7 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize) {
             let prefix = if i == 0 { "      " } else { "        " };
             lines.push(Line::from(Span::styled(
                 format!("{}{}", prefix, chunk),
-                if a.available {
-                    theme::dim()
-                } else {
-                    theme::warning()
-                },
+                detail_style,
             )));
         }
     }

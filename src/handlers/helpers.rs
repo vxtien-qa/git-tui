@@ -84,12 +84,15 @@ fn remap_confirm_action(
     match action {
         ConfirmAction::PassDev(idx) => remap(*idx).map(ConfirmAction::PassDev),
         ConfirmAction::PassStg(idx) => remap(*idx).map(ConfirmAction::PassStg),
-        ConfirmAction::PassUat { indices } => {
+        ConfirmAction::PassUat { indices, bulk } => {
             let remapped: Vec<usize> = indices.iter().filter_map(|i| remap(*i)).collect();
             if remapped.is_empty() {
                 None
             } else {
-                Some(ConfirmAction::PassUat { indices: remapped })
+                Some(ConfirmAction::PassUat {
+                    indices: remapped,
+                    bulk: *bulk,
+                })
             }
         }
         ConfirmAction::Return(idx) => remap(*idx).map(ConfirmAction::Return),
@@ -170,8 +173,16 @@ mod tests {
         let old = vec![item("a"), item("b")];
         let new = vec![item("b"), item("a")]; // reordered by refresh
 
-        match remap_confirm_action(&ConfirmAction::PassUat { indices: vec![0] }, &old, &new) {
-            Some(ConfirmAction::PassUat { indices }) => {
+        match remap_confirm_action(
+            &ConfirmAction::PassUat {
+                indices: vec![0],
+                bulk: true,
+            },
+            &old,
+            &new,
+        ) {
+            Some(ConfirmAction::PassUat { indices, bulk }) => {
+                assert!(bulk);
                 assert_eq!(indices, vec![1], "must follow item 'a'")
             }
             other => panic!("unexpected remap result: {:?}", other),
@@ -182,10 +193,15 @@ mod tests {
     fn test_remap_confirm_action_cancels_when_item_gone() {
         let old = vec![item("a"), item("b")];
         let new = vec![item("b")];
-        assert!(
-            remap_confirm_action(&ConfirmAction::PassUat { indices: vec![0] }, &old, &new)
-                .is_none()
-        );
+        assert!(remap_confirm_action(
+            &ConfirmAction::PassUat {
+                indices: vec![0],
+                bulk: false
+            },
+            &old,
+            &new
+        )
+        .is_none());
         assert!(remap_confirm_action(
             &ConfirmAction::MoveItems {
                 indices: vec![0],

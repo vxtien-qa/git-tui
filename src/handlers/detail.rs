@@ -1,6 +1,6 @@
 use crossterm::event::KeyCode;
 
-use crate::app::{App, ConfirmAction, Popup, ReportKind, Screen};
+use crate::app::{App, BatchKind, ConfirmAction, Popup, ReportKind, Screen};
 use crate::loader;
 use crate::models::status::Status;
 
@@ -108,7 +108,7 @@ fn guarded_confirm(
     }
 }
 
-/// The regression batch: every ticket sitting In UAT in the active sprint.
+/// Candidates for Bulk verify UAT: every ticket In UAT in the active sprint.
 ///
 /// A UAT run verifies everything deployed there at once, so passing it one
 /// ticket at a time meant a keypress and a Slack ping per ticket for a single
@@ -174,31 +174,26 @@ fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
             true
         }
         KeyCode::Char('U') => {
+            guarded_confirm(
+                app,
+                item_idx,
+                PassKind::Uat,
+                "Pass UAT",
+                "Move to Tech Complete + comment tagging the devs?\nOne Slack 'Ready for release' message for this ticket.",
+                ConfirmAction::PassUat {
+                    indices: vec![item_idx],
+                    bulk: false,
+                },
+            );
+            true
+        }
+        KeyCode::Char('V') => {
             match qa_pass_allowed(app, item_idx, PassKind::Uat) {
                 Ok(()) => {
-                    let indices = uat_batch(app, item_idx);
-                    let nums: Vec<String> = indices
-                        .iter()
-                        .filter_map(|i| app.items.get(*i))
-                        .map(|it| {
-                            it.number
-                                .map(|n| format!("#{}", n))
-                                .unwrap_or_else(|| "draft".to_string())
-                        })
-                        .collect();
-                    let preview = if nums.len() <= 10 {
-                        nums.join(", ")
-                    } else {
-                        format!("{}, +{} more", nums[..10].join(", "), nums.len() - 10)
-                    };
-                    app.popup = Popup::Confirm {
-                        title: format!("Pass UAT - {} ticket(s)", indices.len()),
-                        message: format!(
-                            "Regression clear on UAT.\nMove {} ticket(s) to Tech Complete and comment on each:\n{}\nOne 'Ready for release' summary goes to Slack.",
-                            indices.len(), preview
-                        ),
-                        on_confirm: ConfirmAction::PassUat { indices },
-                    };
+                    let rows = uat_batch(app, item_idx);
+                    // A regression run clears everything deployed: all checked,
+                    // the QA unchecks what the run did not cover.
+                    app.open_batch_picker(BatchKind::VerifyUat, &rows, |_| true);
                 }
                 Err(msg) => app.popup = Popup::Error(msg),
             }

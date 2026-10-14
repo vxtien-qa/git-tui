@@ -52,7 +52,12 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                 slack_user_map.clone(),
             );
         }
-        ConfirmAction::PassUat { indices } => {
+        ConfirmAction::PassUat { indices, bulk } => {
+            let bulk = *bulk;
+            // Picked in Bulk verify UAT: the pick list has done its job.
+            if matches!(app.screen, crate::app::Screen::BatchPicker(_)) {
+                app.go_back();
+            }
             // Resolve the status option once, and fail before touching
             // anything if the project fields are not loaded.
             let Some(field) = app.status_field().cloned() else {
@@ -112,7 +117,11 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                     number,
                     repo,
                     comment: comment_with_cc(
-                        "Regression verified on UAT. Moved to Tech Complete.",
+                        if bulk {
+                            "Regression verified on UAT. Moved to Tech Complete."
+                        } else {
+                            "Verified on UAT. Moving to Tech Complete."
+                        },
                         &dev_mentions.join(" "),
                     ),
                 });
@@ -191,8 +200,14 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                                 title: r.title.clone(),
                             })
                             .collect();
-                        if slack::notifier::notify_release_ready(
+                        let notice = if bulk {
+                            slack::notifier::BatchNotice::regression_cleared(released.len())
+                        } else {
+                            slack::notifier::BatchNotice::verified_on_uat()
+                        };
+                        if slack::notifier::notify_batch(
                             url,
+                            &notice,
                             &slack_user,
                             &released,
                             &slack_devs,

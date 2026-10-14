@@ -747,6 +747,10 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         }
         Screen::MyTasks => handlers::board::handle_my_tasks(app, code),
         Screen::Search => handlers::search::handle_search(app, code, modifiers),
+        Screen::BatchPicker(kind) => {
+            let kind = *kind;
+            handlers::batch::handle_batch_picker(app, code, kind);
+        }
         Screen::QaActions(idx) => {
             let idx = *idx;
             handlers::detail::handle_qa_actions(app, code, idx);
@@ -1068,6 +1072,7 @@ fn render_content(
         Screen::ItemDetail(idx) => ui::detail::render(f, app, *idx, inner_area),
         Screen::MyTasks => ui::my_tasks::render(f, app, inner_area),
         Screen::Search => ui::search::render(f, app, inner_area),
+        Screen::BatchPicker(kind) => ui::batch_picker::render(f, app, *kind, inner_area),
         Screen::QaActions(idx) => {
             ui::detail::render(f, app, *idx, inner_area);
             ui::qa_actions::render(f, app, *idx);
@@ -1278,6 +1283,7 @@ mod render_tests {
             Screen::BugReport(None, false),
             Screen::TaskForm(Some(2)),
             Screen::AssigneePicker(AssigneeContext::Bug(Some(2), true)),
+            Screen::BatchPicker(crate::app::BatchKind::VerifyUat),
         ]
     }
 
@@ -1319,6 +1325,27 @@ mod render_tests {
                     .draw(|f| draw(f, &mut app))
                     .unwrap_or_else(|e| panic!("{:?} at {}x{} failed: {}", kind, w, h, e));
             }
+        }
+    }
+
+    /// The batch pick list with rows, scrolled, at every size.
+    #[test]
+    fn batch_picker_renders_at_every_size() {
+        for (w, h) in [(40u16, 8u16), (60, 10), (80, 24), (100, 30), (200, 60)] {
+            let mut app = app_with_items();
+            app.batch_rows = app
+                .items
+                .iter()
+                .enumerate()
+                .map(|(i, it)| (it.id.clone(), i % 2 == 0))
+                .chain(std::iter::once(("gone".to_string(), true)))
+                .collect();
+            app.batch_cursor = 7;
+            app.screen = Screen::BatchPicker(crate::app::BatchKind::VerifyUat);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            terminal
+                .draw(|f| draw(f, &mut app))
+                .unwrap_or_else(|e| panic!("pick list at {}x{} failed: {}", w, h, e));
         }
     }
 
@@ -1535,6 +1562,49 @@ mod snapshot_tool {
                     }
                 }
                 app.screen = Screen::ItemDetail(idx);
+            }
+            // Bulk verify UAT opened with V from the first In UAT ticket.
+            "verify-uat" | "qa-menu-uat" => {
+                app.board_sprint_filter = None;
+                // The board may have nothing In UAT right now: put a few
+                // real tickets there, in memory only, to review the layout.
+                if !app
+                    .items
+                    .iter()
+                    .any(|i| i.status == crate::models::status::Status::InUAT)
+                {
+                    for item in app
+                        .items
+                        .iter_mut()
+                        .filter(|i| i.status == crate::models::status::Status::TechComplete)
+                        .take(6)
+                    {
+                        item.status = crate::models::status::Status::InUAT;
+                    }
+                }
+                let Some(idx) = app
+                    .items
+                    .iter()
+                    .position(|i| i.status == crate::models::status::Status::InUAT)
+                else {
+                    return false;
+                };
+                app.screen = Screen::ItemDetail(idx);
+                if name == "verify-uat" {
+                    handlers::detail::handle_detail(app, KeyCode::Char('V'), idx);
+                    handlers::batch::handle_batch_picker(
+                        app,
+                        KeyCode::Down,
+                        crate::app::BatchKind::VerifyUat,
+                    );
+                    handlers::batch::handle_batch_picker(
+                        app,
+                        KeyCode::Char(' '),
+                        crate::app::BatchKind::VerifyUat,
+                    );
+                } else {
+                    app.screen = Screen::QaActions(idx);
+                }
             }
             "search-copy" => {
                 app.screen = Screen::Search;

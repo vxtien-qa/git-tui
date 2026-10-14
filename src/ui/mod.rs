@@ -1,5 +1,6 @@
 pub mod assignee_picker;
 pub mod auth;
+pub mod batch_picker;
 pub mod board;
 pub mod bug_report;
 pub mod comment;
