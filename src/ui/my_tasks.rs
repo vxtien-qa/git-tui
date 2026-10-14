@@ -59,8 +59,10 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     let groups = app.my_tasks_by_status();
 
-    // UI-10: Empty state
-    if displayed_total == 0 {
+    // UI-10: Empty state - only when the waiting list is empty too, or it
+    // would sit above rows that can be selected (and throw off the scroll
+    // math in handlers::board, which does not count it).
+    if displayed_total == 0 && app.waiting_for_deploy().is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  No tasks assigned to you in this sprint.",
@@ -177,20 +179,22 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             let target = if item.status == Status::InQADev {
                 "STG deploy pending"
             } else {
-                "UAT deploy pending - I when it is on UAT"
+                "UAT deploy pending (I)"
             };
             let (pointer, style) = if is_selected {
                 (theme::icon_arrow(), theme::selected())
             } else {
                 (" ", theme::dim())
             };
+            // The deploy note is the point of the row: the title gives way.
+            let note = format!("  {} {}", theme::icon_right_arrow(), target);
+            let room = col_w
+                .saturating_sub(10 + note.chars().count())
+                .clamp(8, title_w.max(8));
             lines.push(Line::from(vec![
                 Span::styled(format!(" {} {:<6} ", pointer, num), style),
-                Span::styled(trunc(&item.title, title_w), style),
-                Span::styled(
-                    format!("  {} {}", theme::icon_right_arrow(), target),
-                    theme::dim(),
-                ),
+                Span::styled(trunc(&item.title, room), style),
+                Span::styled(note, theme::dim()),
             ]));
         }
         lines.push(Line::from(""));
@@ -211,9 +215,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let footer = super::utils::footer_line(
         &[
             (theme::icon_up_down(), "Nav"),
-            ("Enter", "Detail"),
             ("p", "QA Actions"),
             ("I", "To In UAT"),
+            ("Enter", "Detail"),
             ("f", "Fail"),
             ("m", "Move"),
             ("s", "Sprint"),

@@ -21,7 +21,7 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
             "Checked tickets move to Tech Complete, each gets a comment, and one Slack summary goes out."
         }
         BatchKind::MoveToUat => {
-            "Check the tickets whose code is on UAT: each moves to In UAT, loses Ready-for-UAT and gets a comment; one Slack message lists them. d checks every row's PRs against the UAT branch."
+            "Check the tickets whose code is on UAT: each moves to In UAT, loses Ready-for-UAT and gets a comment; one Slack message lists them. d deploy-checks every row."
         }
     };
 
@@ -70,7 +70,9 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
         );
         // What the deploy check (d) said about UAT, once it ran.
         let uat = {
+            let lookup_failed = item.is_some_and(|i| app.linked_prs_failed.contains_key(&i.id));
             let mark = match item.and_then(|i| app.uat_deploy_state(i)) {
+                _ if lookup_failed => "!".to_string(),
                 Some(state) => super::utils::deploy_mark(&state).0,
                 None if item.is_some_and(|i| app.deploy_check_inflight.contains(&i.id)) => {
                     theme::icon_spinner().to_string()

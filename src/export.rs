@@ -2070,7 +2070,11 @@ pub fn item_to_markdown(item: &Item, owner: &str) -> String {
 
     // Title
     let num = item.number.map(|n| format!("#{}", n)).unwrap_or_default();
-    r.push_str(&format!("## {} - {}\n\n", num, item.title));
+    r.push_str(&format!(
+        "## {} - {}\n\n",
+        num,
+        escape_md_link_text(&clean_title(&item.title))
+    ));
 
     // Fields table
     r.push_str("| Field | Value |\n|-------|-------|\n");

@@ -425,6 +425,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     | crate::app::ActionResult::ParentStatusChanged { .. }
                     | crate::app::ActionResult::RemoveLabelLocal { .. }
                     | crate::app::ActionResult::SprintChanged { .. }
+                    | crate::app::ActionResult::LinkedPrsFetched { .. }
+                    | crate::app::ActionResult::DeployChecked { .. }
             ) {
                 app.loading = false;
             }
@@ -595,7 +597,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         .find(|i| i.id == item_id)
                         .map(|i| app.deploy_summary(i))
                         .unwrap_or_default();
-                    if failures.is_empty() && summary.is_empty() {
+                    if let Some(e) = app.linked_prs_failed.get(&item_id) {
+                        app.set_status(&format!(
+                            "Deploy check {}: could not read linked PRs ({})",
+                            label, e
+                        ));
+                    } else if failures.is_empty() && summary.is_empty() {
                         app.set_status(&format!(
                             "Deploy check {}: no merged linked PR to check",
                             label
@@ -1567,6 +1574,22 @@ mod render_tests {
                 terminal
                     .draw(|f| draw(f, &mut app))
                     .unwrap_or_else(|e| panic!("popup at {}x{} failed: {}", w, h, e));
+                // A popup waiting on the user must keep its way out on
+                // screen at the documented minimum (60x10) and up.
+                if popup.is_interactive() && w >= 60 && h >= 10 {
+                    let buffer = terminal.backend().buffer().clone();
+                    let text: String = (0..h)
+                        .flat_map(|y| (0..w).map(move |x| (x, y)))
+                        .map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                        .collect();
+                    assert!(
+                        text.contains("Esc"),
+                        "{:?} at {}x{} hides its Esc key",
+                        popup,
+                        w,
+                        h
+                    );
+                }
             }
         }
     }
@@ -1801,6 +1824,32 @@ mod snapshot_tool {
                     .strip_prefix("help-")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
+            }
+            // My Tasks with a waiting row selected (labels added in memory
+            // when the board has none waiting).
+            "my-tasks-waiting" => {
+                app.screen = Screen::MyTasks;
+                if app.waiting_for_deploy().is_empty() {
+                    let me = app.current_user.clone();
+                    let sprint = app.board_sprint_filter.clone();
+                    for item in app
+                        .items
+                        .iter_mut()
+                        .filter(|i| {
+                            i.status == crate::models::status::Status::InQA
+                                && i.assignees.contains(&me)
+                                && i.sprint == sprint
+                        })
+                        .take(2)
+                    {
+                        item.labels.push("Ready-for-UAT".into());
+                    }
+                }
+                // Walk down with the real key handler, so it scrolls.
+                app.list_view_height = 18;
+                for _ in 0..app.my_tasks_rows().len() {
+                    handlers::board::handle_my_tasks(app, KeyCode::Down);
+                }
             }
             "slack-notify" => {
                 app.screen = Screen::SlackNotifyConfig;

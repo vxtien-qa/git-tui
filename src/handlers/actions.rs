@@ -1199,7 +1199,13 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                                 ));
                             }
 
-                            let mut moving = "Moving back to In Progress.".to_string();
+                            // Say only what happened: the move to In Progress can
+                            // fail, or be skipped when the fields are not loaded.
+                            let mut moving = if parent_moved {
+                                "Moving back to In Progress.".to_string()
+                            } else {
+                                String::new()
+                            };
                             // Only a parent that really went back changes sprint.
                             if !parent_moved {
                                 if let Some(m) = &parent_sprint_move {
@@ -1228,10 +1234,12 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                                         .push(format!("✗ Parent not moved to {}: {}", m.name, e)),
                                 }
                             }
-                            let comment = comment_with_cc(
-                                &format!("QA found a new bug on this ticket: {}\n{}", url, moving),
-                                &dev_mentions.join(" "),
-                            );
+                            let body = if moving.is_empty() {
+                                format!("QA found a new bug on this ticket: {}", url)
+                            } else {
+                                format!("QA found a new bug on this ticket: {}\n{}", url, moving)
+                            };
+                            let comment = comment_with_cc(&body, &dev_mentions.join(" "));
                             if let Err(e) =
                                 gh::issue::comment(&parent_repo, parent_number, &comment)
                             {

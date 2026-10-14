@@ -516,7 +516,8 @@ pub fn fetch_item_detail(app: &mut App, item_idx: usize) {
 ///
 /// For each merged PR and each `config.deploy_branches` entry, GitHub's
 /// compare API says whether the branch contains the PR's merge commit. Runs
-/// on worker threads, one per PR; the result lands as `DeployChecked`.
+/// on worker threads, up to four PRs at a time; the result lands as
+/// `DeployChecked`.
 pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
     let Some(item) = app.items.get(item_idx) else {
         return;
@@ -525,12 +526,19 @@ pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
         .number
         .map(|n| format!("#{}", n))
         .unwrap_or_else(|| "this ticket".to_string());
-    if item.content_type == crate::models::item::ContentType::PullRequest {
-        app.set_status(&format!(
-            "{} is a pull request card - open the ticket it belongs to and press d there",
-            label
-        ));
-        return;
+    match item.content_type {
+        crate::models::item::ContentType::Issue => {}
+        crate::models::item::ContentType::PullRequest => {
+            app.set_status(&format!(
+                "{} is a pull request card - open the ticket it belongs to and press d there",
+                label
+            ));
+            return;
+        }
+        crate::models::item::ContentType::DraftIssue => {
+            app.set_status("A draft card has no linked PRs - nothing to check");
+            return;
+        }
     }
     if let Some(e) = app.linked_prs_failed.get(&item.id) {
         app.set_status(&format!(
@@ -636,6 +644,10 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
         let (Some(number), Some(repo)) = (item.number, item.repository.clone()) else {
             continue;
         };
+        // A row whose lookup failed earlier gets a fresh one.
+        let known = (app.linked_prs_loaded.contains(&item.id)
+            && !app.linked_prs_failed.contains_key(&item.id))
+        .then(|| item.linked_prs.clone());
         if item.content_type != crate::models::item::ContentType::Issue
             || app.deploy_check_inflight.contains(&item.id)
         {
@@ -646,10 +658,7 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
             label: format!("#{}", number),
             repo,
             number,
-            known: app
-                .linked_prs_loaded
-                .contains(&item.id)
-                .then(|| item.linked_prs.clone()),
+            known,
         });
     }
     if rows.is_empty() {
@@ -665,6 +674,7 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
 
     let tx = app.action_tx.clone();
     std::thread::spawn(move || {
+        let mut failed = 0usize;
         for chunk in rows.chunks(4) {
             let workers: Vec<_> = chunk
                 .iter()
@@ -684,11 +694,22 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
                             None => {
                                 let result =
                                     gh::issue::linked_prs(&repo, number).map_err(|e| e.to_string());
+                                let ok = result.is_ok();
                                 let prs = result.clone().unwrap_or_default();
                                 let _ = tx.send(crate::app::ActionResult::LinkedPrsFetched {
                                     item_id: item_id.clone(),
                                     result,
                                 });
+                                if !ok {
+                                    // Recorded as failed by LinkedPrsFetched; the
+                                    // row shows ! and the summary counts it.
+                                    let _ = tx.send(crate::app::ActionResult::DeployChecked {
+                                        item_id,
+                                        label,
+                                        results: Vec::new(),
+                                    });
+                                    return false;
+                                }
                                 prs
                             }
                         };
@@ -714,17 +735,24 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
                             label,
                             results,
                         });
+                        true
                     })
                 })
                 .collect();
             for w in workers {
-                let _ = w.join();
+                if !w.join().unwrap_or(false) {
+                    failed += 1;
+                }
             }
         }
-        let _ = tx.send(crate::app::ActionResult::StatusMessage(format!(
-            "Deploy check finished for {} ticket(s)",
-            total
-        )));
+        let _ = tx.send(crate::app::ActionResult::StatusMessage(if failed == 0 {
+            format!("Deploy check finished for {} ticket(s)", total)
+        } else {
+            format!(
+                "Deploy check finished for {} ticket(s); {} could not read linked PRs (marked !) - open one and press r to retry",
+                total, failed
+            )
+        }));
     });
 }
 
@@ -793,10 +821,6 @@ fn resolve_detail_params(
     Some((number, repo))
 }
 
-/// Spawn detail fetch thread - sends result via ActionResult (for action_rx).
-/// This is the user-initiated Reload path, so it also refetches the live
-/// project Status (`gh issue view` can't return it - it's a project field,
-/// and without this the reload appeared to "not work" for status changes).
 /// Whether the card is an issue - the only kind with linked PRs to read.
 fn is_issue(app: &App, item_idx: usize) -> bool {
     app.items
@@ -804,6 +828,10 @@ fn is_issue(app: &App, item_idx: usize) -> bool {
         .is_some_and(|i| i.content_type == crate::models::item::ContentType::Issue)
 }
 
+/// Spawn detail fetch thread - sends result via ActionResult (for action_rx).
+/// This is the user-initiated Reload path, so it also refetches the live
+/// project Status (`gh issue view` can't return it - it's a project field,
+/// and without this the reload appeared to "not work" for status changes).
 fn spawn_detail_fetch_action(
     tx: std::sync::mpsc::Sender<crate::app::ActionResult>,
     item_id: String,

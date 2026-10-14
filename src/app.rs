@@ -915,6 +915,9 @@ impl App {
             (*failed).clone()
         } else if states.iter().all(|s| *s == Some(&DeployState::Contained)) {
             DeployState::Contained
+        } else if states.iter().all(|s| *s == Some(&DeployState::NotFound)) {
+            // No UAT branch where any of the PRs live: the same - as Item Detail.
+            DeployState::NotFound
         } else {
             DeployState::Unknown
         })
@@ -2437,6 +2440,11 @@ mod tests {
         assert!(matches!(app.uat_deploy_state(&item), Some(Failed(_))));
         app.deploy_checks.insert("b".into(), env(Missing));
         assert_eq!(app.uat_deploy_state(&item), Some(Missing));
+
+        // No UAT branch anywhere: - as in Item Detail, not ?.
+        app.deploy_checks.insert("a".into(), env(NotFound));
+        app.deploy_checks.insert("b".into(), env(NotFound));
+        assert_eq!(app.uat_deploy_state(&item), Some(NotFound));
     }
 
     #[test]

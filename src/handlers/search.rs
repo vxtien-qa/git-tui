@@ -89,6 +89,12 @@ pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                     filter.push(opt);
                 }
                 app.apply_filters();
+                // Switching off a value the board no longer offers removes it
+                // from the row: keep the cursor on an option.
+                let len = get_filter_options_len(app, app.search_field_idx);
+                if len > 0 && app.filter_cursor[ci] >= len {
+                    app.filter_cursor[ci] = len - 1;
+                }
             }
         }
         KeyCode::Char(c) => {

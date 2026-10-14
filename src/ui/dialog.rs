@@ -222,6 +222,10 @@ pub fn render_choice(f: &mut Frame, title: &str, message: &str, choices: &[(&str
     ]));
 
     let max_h = f.area().height.saturating_sub(2);
+    // Short terminal: spacer rows go first, so the keys stay on screen.
+    if lines.len() as u16 + 2 > max_h {
+        lines.retain(|l| l.width() > 0);
+    }
     let height = (lines.len() as u16 + 2).min(max_h);
     let area = centered_rect(popup_w, height, f.area());
     f.render_widget(Clear, area);
@@ -269,6 +273,10 @@ pub fn render_text_prompt(f: &mut Frame, title: &str, message: &str, value: &str
     ]));
 
     let max_h = f.area().height.saturating_sub(2);
+    // Short terminal: spacer rows go first, so the keys stay on screen.
+    if lines.len() as u16 + 2 > max_h {
+        lines.retain(|l| l.width() > 0);
+    }
     let height = (lines.len() as u16 + 2).min(max_h);
     let area = centered_rect(popup_w, height, f.area());
     f.render_widget(Clear, area);
