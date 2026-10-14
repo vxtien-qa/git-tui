@@ -6,15 +6,23 @@ use ratatui::Frame;
 use super::theme;
 use super::utils::trunc;
 use crate::app::App;
-use crate::models::status::Status;
 
 /// Render Search & Filter screen - full-width, wrapped options.
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
     let w = area.width as usize;
 
     // Build filter lines first to know exact height needed
-    let filter_lines = build_filter_lines(app, w);
+    let (filter_lines, cursor_line) = build_filter_lines(app, w);
     let filter_height = (filter_lines.len() + 2).min(area.height as usize / 2) as u16; // +2 for border
+                                                                                       // The focused row's options can run past the panel (the EPIC and Assignee
+                                                                                       // rows wrap to several lines): scroll so the option under the cursor is
+                                                                                       // always on screen, or Space would toggle something the user can't see.
+    let inner_h = filter_height.saturating_sub(2) as usize;
+    let filter_scroll = if inner_h > 0 && cursor_line >= inner_h {
+        (cursor_line + 1 - inner_h) as u16
+    } else {
+        0
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -36,7 +44,12 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
             format!(" Search & Filter  [Tab] {} ", focused_field_name(app)),
             theme::title(),
         ));
-    f.render_widget(Paragraph::new(filter_lines).block(filter_block), chunks[0]);
+    f.render_widget(
+        Paragraph::new(filter_lines)
+            .block(filter_block)
+            .scroll((filter_scroll, 0)),
+        chunks[0],
+    );
 
     // ── Results ──
     let mut result_rows: Vec<Row> = Vec::new();
@@ -162,14 +175,18 @@ fn focused_field_name(app: &App) -> &'static str {
         2 => "Priority",
         3 => "Stack",
         4 => "Sprint",
-        _ => "Label",
+        5 => "Label",
+        6 => "EPIC",
+        _ => "Assignee",
     }
 }
 
-/// Build all filter lines, wrapping options to fit within `max_w`.
-fn build_filter_lines(app: &App, max_w: usize) -> Vec<Line<'static>> {
+/// Build all filter lines, wrapping options to fit within `max_w`, and the
+/// index of the line holding the focused row's cursor.
+fn build_filter_lines(app: &App, max_w: usize) -> (Vec<Line<'static>>, usize) {
     let inner_w = max_w.saturating_sub(4); // inside border + padding
     let mut lines: Vec<Line> = Vec::new();
+    let mut cursor_line = 0;
 
     // ── Keyword ──
     let kw_focused = app.search_field_idx == 0;
@@ -202,31 +219,25 @@ fn build_filter_lines(app: &App, max_w: usize) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
 
     // ── Filter fields ──
-    let filter_defs: Vec<(&str, &Vec<String>, usize, Vec<String>)> = vec![
-        (
-            "Status  ",
-            &app.filter_status,
-            0,
-            Status::all_columns()
-                .iter()
-                .map(|s| s.label().to_string())
-                .collect(),
-        ),
-        (
-            "Priority",
-            &app.filter_priority,
-            1,
-            app.available_priorities(),
-        ),
-        ("Stack   ", &app.filter_stack, 2, app.available_stacks()),
-        (
-            "Sprint  ",
-            &app.filter_sprint,
-            3,
-            app.sprint_filter_options().into_iter().flatten().collect(),
-        ),
-        ("Label   ", &app.filter_label, 4, app.available_labels()),
+    // Row names, padded to one width; the order is `search_field_idx` 1..
+    const ROW_NAMES: [&str; App::SEARCH_FILTER_ROWS] = [
+        "Status  ", "Priority", "Stack   ", "Sprint  ", "Label   ", "EPIC    ", "Assignee",
     ];
+    // (row name, active filter values, cursor slot, (value, label) options)
+    type FilterRow<'a> = (&'a str, &'a Vec<String>, usize, Vec<(String, String)>);
+    let filter_defs: Vec<FilterRow> = ROW_NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let field_idx = i + 1;
+            (
+                *name,
+                app.search_filter(field_idx),
+                i,
+                app.search_filter_options(field_idx),
+            )
+        })
+        .collect();
 
     for (i, (label, selected, cursor_field, options)) in filter_defs.iter().enumerate() {
         let field_idx = i + 1;
@@ -241,13 +252,22 @@ fn build_filter_lines(app: &App, max_w: usize) -> Vec<Line<'static>> {
                     Span::styled("All", theme::dim()),
                 ]));
             } else {
+                // Show labels, not stored values: an EPIC value carries the
+                // repository, which says nothing at a glance.
+                let label_of = |value: &str| {
+                    options
+                        .iter()
+                        .find(|(v, _)| v == value)
+                        .map(|(_, l)| l.clone())
+                        .unwrap_or_else(|| value.to_string())
+                };
                 let tags: Vec<String> = selected
                     .iter()
                     .map(|s| {
                         if let Some(rest) = s.strip_prefix('!') {
-                            format!("NOT {}", rest)
+                            format!("NOT {}", label_of(rest))
                         } else {
-                            s.clone()
+                            label_of(s)
                         }
                     })
                     .collect();
@@ -276,18 +296,18 @@ fn build_filter_lines(app: &App, max_w: usize) -> Vec<Line<'static>> {
         let mut current_spans: Vec<Span> = vec![Span::raw(pad_left.to_string())];
         let mut current_w = pad_left_w;
 
-        for (opt_idx, opt) in options.iter().enumerate() {
+        for (opt_idx, (opt, opt_label)) in options.iter().enumerate() {
             let is_include = selected.contains(opt);
             let not_val = format!("!{}", opt);
             let is_exclude = selected.contains(&not_val);
             let is_cur = cursor_pos == opt_idx;
 
             let chip = if is_include {
-                format!(" {} {} ", theme::icon_bullet(), opt)
+                format!(" {} {} ", theme::icon_bullet(), opt_label)
             } else if is_exclude {
-                format!(" {} {} ", theme::icon_fail(), opt)
+                format!(" {} {} ", theme::icon_fail(), opt_label)
             } else {
-                format!(" {} {} ", theme::icon_bullet_empty(), opt)
+                format!(" {} {} ", theme::icon_bullet_empty(), opt_label)
             };
             let chip_w = chip.chars().count();
 
@@ -296,6 +316,9 @@ fn build_filter_lines(app: &App, max_w: usize) -> Vec<Line<'static>> {
                 lines.push(Line::from(current_spans));
                 current_spans = vec![Span::raw(pad_left.to_string())];
                 current_w = pad_left_w;
+            }
+            if is_cur {
+                cursor_line = lines.len();
             }
 
             let style = if is_cur {
@@ -319,5 +342,5 @@ fn build_filter_lines(app: &App, max_w: usize) -> Vec<Line<'static>> {
         lines.push(Line::from("")); // spacer after focused field
     }
 
-    lines
+    (lines, cursor_line)
 }

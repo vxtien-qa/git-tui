@@ -1,7 +1,9 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::app::App;
-use crate::models::status::Status;
+
+/// Tab stops: the keyword box plus one per filter row.
+const FIELDS: usize = App::SEARCH_FILTER_ROWS + 1;
 
 pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match key {
@@ -12,11 +14,11 @@ pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
             app.set_status("Filters cleared");
         }
         KeyCode::Tab => {
-            app.search_field_idx = (app.search_field_idx + 1) % 6;
+            app.search_field_idx = (app.search_field_idx + 1) % FIELDS;
         }
         KeyCode::BackTab => {
             app.search_field_idx = if app.search_field_idx == 0 {
-                5
+                FIELDS - 1
             } else {
                 app.search_field_idx - 1
             };
@@ -52,7 +54,7 @@ pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
             let cursor_pos = app.filter_cursor[ci];
             if let Some(opt) = get_filter_option_at(app, app.search_field_idx, cursor_pos) {
                 let not_opt = format!("!{}", opt);
-                let filter = get_filter_mut(app, app.search_field_idx);
+                let filter = app.search_filter_mut(app.search_field_idx);
 
                 let is_include = filter.contains(&opt);
                 let is_exclude = filter.contains(&not_opt);
@@ -116,60 +118,23 @@ pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
 /// Reset the search query and every filter field.
 fn clear_all_filters(app: &mut App) {
     app.search_query.clear();
-    app.filter_status.clear();
-    app.filter_priority.clear();
-    app.filter_stack.clear();
-    app.filter_sprint.clear();
-    app.filter_label.clear();
-    app.filter_cursor = vec![0; 5];
+    for field in 1..FIELDS {
+        app.search_filter_mut(field).clear();
+    }
+    app.filter_cursor = vec![0; App::SEARCH_FILTER_ROWS];
     app.search_field_idx = 0;
     app.apply_filters();
 }
 
 /// Get the number of options for a filter field.
 pub fn get_filter_options_len(app: &App, field_idx: usize) -> usize {
-    match field_idx {
-        1 => Status::all_columns().len(),
-        2 => app.available_priorities().len(),
-        3 => app.available_stacks().len(),
-        4 => app
-            .sprint_filter_options()
-            .iter()
-            .filter(|o| o.is_some())
-            .count(),
-        5 => app.available_labels().len(),
-        _ => 0,
-    }
+    app.search_filter_options(field_idx).len()
 }
 
-/// Get option string at cursor position.
+/// Get the filter value of the option at the cursor.
 pub fn get_filter_option_at(app: &App, field_idx: usize, cursor_pos: usize) -> Option<String> {
-    let options: Vec<String> = match field_idx {
-        1 => Status::all_columns()
-            .iter()
-            .map(|s| s.label().to_string())
-            .collect(),
-        2 => app.available_priorities(),
-        3 => app.available_stacks(),
-        4 => app.sprint_filter_options().into_iter().flatten().collect(),
-        5 => app.available_labels(),
-        _ => return None,
-    };
-    let len = options.len();
-    if len == 0 || cursor_pos >= len {
-        return None;
-    }
-    Some(options[cursor_pos].clone())
-}
-
-/// Get mutable reference to filter Vec for a field.
-pub fn get_filter_mut(app: &mut App, field_idx: usize) -> &mut Vec<String> {
-    match field_idx {
-        1 => &mut app.filter_status,
-        2 => &mut app.filter_priority,
-        3 => &mut app.filter_stack,
-        4 => &mut app.filter_sprint,
-        5 => &mut app.filter_label,
-        _ => &mut app.filter_status, // safe fallback
-    }
+    app.search_filter_options(field_idx)
+        .into_iter()
+        .nth(cursor_pos)
+        .map(|(value, _)| value)
 }

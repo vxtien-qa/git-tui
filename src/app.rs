@@ -306,6 +306,10 @@ pub struct App {
     pub filter_stack: Vec<String>,
     pub filter_sprint: Vec<String>,
     pub filter_label: Vec<String>,
+    /// EPIC / root ticket, by `models::root::Root::filter_value`.
+    pub filter_epic: Vec<String>,
+    /// Assignee login, or [`App::NO_ASSIGNEE`].
+    pub filter_assignee: Vec<String>,
     pub filter_cursor: Vec<usize>, // cursor index per filter field (for Space toggle)
 
     // Detail state
@@ -471,7 +475,9 @@ impl App {
             filter_stack: Vec::new(),
             filter_sprint: Vec::new(),
             filter_label: Vec::new(),
-            filter_cursor: vec![0; 5],
+            filter_epic: Vec::new(),
+            filter_assignee: Vec::new(),
+            filter_cursor: vec![0; App::SEARCH_FILTER_ROWS],
             detail_scroll: 0,
             help_scroll: 0,
             dashboard_scroll: 0,
@@ -663,6 +669,13 @@ impl App {
 
         items
     }
+
+    /// Search filter rows below the keyword box: Status, Priority, Stack,
+    /// Sprint, Label, EPIC, Assignee.
+    pub const SEARCH_FILTER_ROWS: usize = 7;
+
+    /// Assignee filter value for a ticket nobody is assigned to.
+    pub const NO_ASSIGNEE: &'static str = "(none)";
 
     /// Environments selectable in the Bug Report form (shared by UI + submit).
     pub const BUG_ENVS: [&str; 5] = ["Dev", "STG", "UAT", "Demo", "Prod"];
@@ -1132,6 +1145,71 @@ impl App {
         labels
     }
 
+    /// Every login assigned on the board, sorted, then [`App::NO_ASSIGNEE`].
+    pub fn available_assignees(&self) -> Vec<String> {
+        let mut logins: Vec<String> = self
+            .items
+            .iter()
+            .flat_map(|item| item.assignees.iter().cloned())
+            .collect();
+        logins.sort_by_key(|l| l.to_lowercase());
+        logins.dedup();
+        logins.push(Self::NO_ASSIGNEE.to_string());
+        logins
+    }
+
+    /// Options of one Search filter row as (filter value, label).
+    ///
+    /// `field_idx` counts the keyword box as 0, like `search_field_idx`. The
+    /// value is what a filter stores and a saved filter keeps; the label is
+    /// what the row shows. They differ only for the EPIC row, whose values
+    /// carry the repository because issue numbers repeat across repositories.
+    pub fn search_filter_options(&self, field_idx: usize) -> Vec<(String, String)> {
+        let same = |v: Vec<String>| v.into_iter().map(|o| (o.clone(), o)).collect();
+        match field_idx {
+            1 => same(
+                Status::all_columns()
+                    .iter()
+                    .map(|s| s.label().to_string())
+                    .collect(),
+            ),
+            2 => same(self.available_priorities()),
+            3 => same(self.available_stacks()),
+            4 => same(self.sprint_filter_options().into_iter().flatten().collect()),
+            5 => same(self.available_labels()),
+            6 => crate::models::root::root_filter_options(&self.items),
+            7 => same(self.available_assignees()),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The filter values of one Search row (`field_idx` as in
+    /// `search_filter_options`).
+    pub fn search_filter(&self, field_idx: usize) -> &Vec<String> {
+        match field_idx {
+            1 => &self.filter_status,
+            2 => &self.filter_priority,
+            3 => &self.filter_stack,
+            4 => &self.filter_sprint,
+            5 => &self.filter_label,
+            6 => &self.filter_epic,
+            _ => &self.filter_assignee,
+        }
+    }
+
+    /// Mutable `search_filter`.
+    pub fn search_filter_mut(&mut self, field_idx: usize) -> &mut Vec<String> {
+        match field_idx {
+            1 => &mut self.filter_status,
+            2 => &mut self.filter_priority,
+            3 => &mut self.filter_stack,
+            4 => &mut self.filter_sprint,
+            5 => &mut self.filter_label,
+            6 => &mut self.filter_epic,
+            _ => &mut self.filter_assignee,
+        }
+    }
+
     /// Get all unique priorities from items.
     pub fn available_priorities(&self) -> Vec<String> {
         let mut prios: Vec<String> = self
@@ -1164,6 +1242,8 @@ impl App {
             || !self.filter_stack.is_empty()
             || !self.filter_sprint.is_empty()
             || !self.filter_label.is_empty()
+            || !self.filter_epic.is_empty()
+            || !self.filter_assignee.is_empty()
     }
 
     /// Recompute `search_results`, keeping the cursor on the item it was on.
@@ -1196,6 +1276,9 @@ impl App {
     /// Apply all active filters and update search_results (resets the cursor -
     /// use `reapply_filters_keep_cursor` for refreshes).
     pub fn apply_filters(&mut self) {
+        // Built only when the EPIC row is in use: it indexes the whole board.
+        let roots = (!self.filter_epic.is_empty())
+            .then(|| crate::models::root::RootIndex::new(&self.items));
         self.search_results = self
             .items
             .iter()
@@ -1247,6 +1330,19 @@ impl App {
                 {
                     return false;
                 }
+                // EPIC / root filter
+                if let Some(roots) = &roots {
+                    let root = roots.resolve(item).filter_value();
+                    if !multi_filter_match(&self.filter_epic, &root) {
+                        return false;
+                    }
+                }
+                // Assignee filter
+                if !self.filter_assignee.is_empty()
+                    && !assignee_filter_match(&self.filter_assignee, &item.assignees)
+                {
+                    return false;
+                }
                 true
             })
             .map(|(idx, _)| idx)
@@ -1269,6 +1365,27 @@ fn label_filter_match(filters: &[String], labels: &[String]) -> bool {
         if has(&ex[1..]) {
             return false;
         }
+    }
+    let mut includes = filters.iter().filter(|f| !f.starts_with('!')).peekable();
+    if includes.peek().is_none() {
+        return true;
+    }
+    includes.any(|inc| has(inc))
+}
+
+/// Assignee filter match, the same rules as labels: an exclude vetoes when any
+/// assignee matches it, an include passes when any assignee matches it.
+/// [`App::NO_ASSIGNEE`] stands for a ticket with no assignee at all.
+fn assignee_filter_match(filters: &[String], assignees: &[String]) -> bool {
+    let has = |login: &str| {
+        if login == App::NO_ASSIGNEE {
+            assignees.is_empty()
+        } else {
+            assignees.iter().any(|a| a.eq_ignore_ascii_case(login))
+        }
+    };
+    if filters.iter().filter_map(|f| f.strip_prefix('!')).any(&has) {
+        return false;
     }
     let mut includes = filters.iter().filter(|f| !f.starts_with('!')).peekable();
     if includes.peek().is_none() {
@@ -1682,6 +1799,89 @@ mod tests {
             .map(|(_, i)| i.id.as_str())
             .collect();
         assert_eq!(ids, vec!["1", "2"]);
+    }
+
+    #[test]
+    fn test_assignee_filter_match() {
+        let both = vec!["vxtien-qa".to_string(), "dev-a".to_string()];
+        let none: Vec<String> = Vec::new();
+        assert!(assignee_filter_match(&["vxtien-qa".into()], &both));
+        assert!(assignee_filter_match(&["VXTIEN-QA".into()], &both));
+        assert!(!assignee_filter_match(&["mmaguad".into()], &both));
+        // An exclude vetoes even when an include matches.
+        assert!(!assignee_filter_match(
+            &["dev-a".into(), "!vxtien-qa".into()],
+            &both
+        ));
+        assert!(assignee_filter_match(&["!mmaguad".into()], &both));
+        // (none) matches only an unassigned ticket.
+        assert!(assignee_filter_match(&[App::NO_ASSIGNEE.into()], &none));
+        assert!(!assignee_filter_match(&[App::NO_ASSIGNEE.into()], &both));
+        assert!(!assignee_filter_match(
+            &[format!("!{}", App::NO_ASSIGNEE)],
+            &none
+        ));
+    }
+
+    #[test]
+    fn test_epic_and_assignee_filters_narrow_search() {
+        let mut app = App::new();
+        let repo = Some("acme/board".to_string());
+        let mk = |n: u32, title: &str, parent: Option<u32>, who: &[&str]| Item {
+            id: n.to_string(),
+            number: Some(n),
+            title: title.into(),
+            repository: repo.clone(),
+            parent_number: parent,
+            assignees: who.iter().map(|w| w.to_string()).collect(),
+            status: Status::InQA,
+            ..Default::default()
+        };
+        app.items = vec![
+            mk(3111, "[Epic] Dave project", None, &[]),
+            mk(1, "Under Dave", Some(3111), &["vxtien-qa"]),
+            mk(2, "Under Dave too", Some(3111), &["mmaguad"]),
+            mk(3, "Elsewhere", Some(4101), &["vxtien-qa"]),
+            mk(4, "No parent", None, &[]),
+        ];
+
+        app.filter_epic = vec!["acme/board#3111".into()];
+        app.apply_filters();
+        assert_eq!(app.search_results, vec![1, 2]);
+
+        app.filter_assignee = vec!["vxtien-qa".into()];
+        app.apply_filters();
+        assert_eq!(app.search_results, vec![1]);
+
+        // Exclude the epic: what's left that is mine.
+        app.filter_epic = vec!["!acme/board#3111".into()];
+        app.apply_filters();
+        assert_eq!(app.search_results, vec![3]);
+
+        app.filter_epic = vec![crate::models::root::NO_PARENT.into()];
+        app.filter_assignee = vec![App::NO_ASSIGNEE.into()];
+        app.apply_filters();
+        assert_eq!(app.search_results, vec![0, 4]);
+        assert!(app.has_active_filters());
+    }
+
+    #[test]
+    fn test_search_filter_options_line_up_with_rows() {
+        let app = App::new();
+        // Every row has a backing filter, and the keyword box (0) has no options.
+        assert!(app.search_filter_options(0).is_empty());
+        for field in 1..=App::SEARCH_FILTER_ROWS {
+            let _ = app.search_filter(field);
+        }
+        // Assignee always offers (none), EPIC always offers No parent.
+        assert_eq!(
+            app.search_filter_options(7).last().map(|(v, _)| v.as_str()),
+            Some(App::NO_ASSIGNEE)
+        );
+        assert_eq!(
+            app.search_filter_options(6).last().map(|(v, _)| v.as_str()),
+            Some(crate::models::root::NO_PARENT)
+        );
     }
 
     #[test]

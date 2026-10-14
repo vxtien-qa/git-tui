@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::cache::Cache;
+use crate::models::root::{clean_title, resolve_root, Root};
 use crate::models::status::Status;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
 
@@ -1134,165 +1135,6 @@ fn title_slack(item: &Item) -> String {
     crate::slack::webhook::escape_mrkdwn(&clean_title(&item.title))
 }
 
-/// Title on one line.
-///
-/// Titles come straight from GitHub and some carry an embedded newline or a
-/// trailing space (a body pasted into the title field). Printed raw they broke
-/// a report line in half, so the status and priority of a ticket ended up on
-/// their own line in Slack.
-fn clean_title(title: &str) -> String {
-    title.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Whether an issue is an EPIC.
-///
-/// The board is not consistent about this: some epics carry the `Epic` label,
-/// others only the `[Epic]` title prefix, so both signals count.
-fn is_epic(item: &Item) -> bool {
-    item.labels.iter().any(|l| App::label_eq(l, "Epic"))
-        || clean_title(&item.title)
-            .to_lowercase()
-            .starts_with("[epic]")
-}
-
-/// Longest epic name a report line will carry.
-const EPIC_NAME_MAX: usize = 32;
-
-/// Depth cap for the parent walk - a cycle on the board would otherwise hang
-/// the report.
-const MAX_PARENT_HOPS: usize = 4;
-
-/// Epic name without its `[Epic]` prefix, short enough for a report line.
-fn epic_short_name(item: &Item) -> String {
-    short_root_name(&item.title)
-}
-
-/// A root ticket's title without an `[Epic]` prefix, cut to fit a report line.
-fn short_root_name(raw: &str) -> String {
-    let title = clean_title(raw);
-    let name = title
-        .strip_prefix("[Epic]")
-        .or_else(|| title.strip_prefix("[EPIC]"))
-        .or_else(|| title.strip_prefix("[epic]"))
-        .unwrap_or(title.as_str())
-        .trim()
-        .to_string();
-    if name.chars().count() > EPIC_NAME_MAX {
-        let cut: String = name.chars().take(EPIC_NAME_MAX).collect();
-        format!("{}...", cut.trim_end())
-    } else {
-        name
-    }
-}
-
-/// The top of a ticket's sub-issue chain.
-///
-/// Half of Sprint 29 had no epic above it, and "[no epic]" said nothing about
-/// where those tickets belonged: 24 hung off `#3916 Issues sprint 29`, a
-/// plain task the QA files bugs under. The root names that.
-enum Root<'a> {
-    /// An epic on the board.
-    Epic(&'a Item),
-    /// The chain ends at a ticket on the board that is not an epic.
-    Ticket(&'a Item),
-    /// The chain leaves the board: sync stores each parent's number and
-    /// title, so the first parent that is not a project item can still be
-    /// named.
-    OffBoard { number: u32, title: Option<String> },
-    /// No parent at all.
-    None,
-}
-
-impl Root<'_> {
-    /// Short name for a report line, `None` when there is no chain.
-    fn short_name(&self) -> Option<String> {
-        match self {
-            Root::Epic(i) | Root::Ticket(i) => Some(epic_short_name(i)),
-            Root::OffBoard {
-                title: Some(title), ..
-            } => Some(short_root_name(title)),
-            Root::OffBoard {
-                number,
-                title: None,
-            } => Some(format!("#{}", number)),
-            Root::None => None,
-        }
-    }
-
-    /// Name of the rollup group, with the format's own issue link.
-    fn group_name(&self, link: &dyn Fn(&Item) -> String) -> String {
-        match self {
-            Root::Epic(i) | Root::Ticket(i) => format!("{} {}", link(i), epic_short_name(i)),
-            Root::OffBoard { number, title } => format!(
-                "#{} {}",
-                number,
-                title
-                    .as_deref()
-                    .map(short_root_name)
-                    .unwrap_or_else(|| "(not on the board)".to_string())
-            ),
-            Root::None => "No parent".to_string(),
-        }
-    }
-
-    /// Grouping key. Board items by project item id (issue numbers repeat
-    /// across the project's repositories), off-board parents by number.
-    fn key(&self) -> String {
-        match self {
-            Root::Epic(i) | Root::Ticket(i) => format!("item:{}", i.id),
-            Root::OffBoard { number, .. } => format!("off:{}", number),
-            Root::None => "none".to_string(),
-        }
-    }
-
-    /// Sort rank: epics, then other roots, then "no parent".
-    fn rank(&self) -> u8 {
-        match self {
-            Root::Epic(_) => 0,
-            Root::Ticket(_) | Root::OffBoard { .. } => 1,
-            Root::None => 2,
-        }
-    }
-}
-
-/// Walk up the sub-issue chain to its root.
-///
-/// Sync fetches only ONE parent level (`parent_number`, `parent_title`), so
-/// the rest of the chain is rebuilt from the board itself: the parent is
-/// looked up among the loaded items and its own parent read from there.
-/// Most tickets hang straight off an epic, but some sit under a story that
-/// hangs off one.
-///
-/// Matching on number AND repository is deliberate: the project spans several
-/// repositories and the same issue number exists in more than one of them.
-fn resolve_root<'a>(item: &Item, items: &'a [Item]) -> Root<'a> {
-    let Some(mut number) = item.parent_number else {
-        return Root::None;
-    };
-    let mut title = item.parent_title.clone();
-    let repo = item.repository.as_deref();
-    for _ in 0..MAX_PARENT_HOPS {
-        let Some(parent) = items
-            .iter()
-            .find(|i| i.number == Some(number) && i.repository.as_deref() == repo)
-        else {
-            return Root::OffBoard { number, title };
-        };
-        if is_epic(parent) {
-            return Root::Epic(parent);
-        }
-        match parent.parent_number {
-            Some(next) => {
-                number = next;
-                title = parent.parent_title.clone();
-            }
-            None => return Root::Ticket(parent),
-        }
-    }
-    // Deeper than any real chain: treat as a cycle and give up.
-    Root::None
-}
-
 /// The EPIC an item belongs to, if the chain above it reaches one.
 #[cfg(test)]
 fn resolve_epic<'a>(item: &Item, items: &'a [Item]) -> Option<&'a Item> {
@@ -2349,6 +2191,7 @@ pub fn read_from_clipboard() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::root::{epic_short_name, is_epic};
     use chrono::{NaiveDate, TimeZone};
 
     // Helper to easily create Utc date times

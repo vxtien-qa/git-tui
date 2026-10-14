@@ -116,6 +116,15 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         section("Search & Filter"),
         key_line("Tab / S-Tab", "Switch filter field"),
+        key_line(
+            "  rows",
+            "Status, Priority, Stack, Sprint, Label, EPIC, Assignee",
+        ),
+        key_line(
+            "  EPIC",
+            "root of the sub-issue chain; only roots with open work",
+        ),
+        key_line("  Assignee", "any assignee matches; (none) = unassigned"),
         key_line(&arrows_lr, "Navigate options"),
         key_line("Space", "Toggle filter (include → exclude → off)"),
         key_line("Ctrl+L", "Clear all filters"),

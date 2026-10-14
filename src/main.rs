@@ -1296,6 +1296,89 @@ mod snapshot_tool {
     use ratatui::backend::TestBackend;
 
     /// Dump screens as text so the layout can be eyeballed without a terminal:
+    /// Print `screen` as text, framed so trailing spaces stay visible.
+    fn print_screen(app: &mut App, label: &str, w: u16, h: u16) {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        println!("\n=== {} @ {}x{} ===", label, w, h);
+        for y in 0..h {
+            let line: String = (0..w)
+                .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                .collect();
+            println!("|{}|", line.trim_end());
+        }
+    }
+
+    /// Scenarios for `snapshot_live`, by name: each sets up the app state a
+    /// screen is reviewed in.
+    fn live_scenario(app: &mut App, name: &str) -> bool {
+        match name {
+            "search" => {
+                app.screen = Screen::Search;
+                app.apply_filters();
+            }
+            "search-epic" => {
+                app.screen = Screen::Search;
+                app.search_field_idx = 6;
+                if let Some((value, _)) = app.search_filter_options(6).into_iter().nth(3) {
+                    app.filter_epic = vec![value];
+                }
+                app.filter_cursor[5] = 3;
+                app.apply_filters();
+            }
+            "search-assignee" => {
+                app.screen = Screen::Search;
+                app.search_field_idx = 7;
+                app.filter_status = vec!["In QA".to_string()];
+                app.filter_label = vec!["!Ready-for-UAT".to_string()];
+                app.filter_assignee = vec![app.config.current_user.clone()];
+                app.apply_filters();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Render screens over the real board from the local cache, for reviewing
+    /// a layout against real titles, epics and assignees. Read-only: it never
+    /// calls GitHub.
+    ///
+    /// `SNAP=search,search-epic cargo test snapshot_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn snapshot_live() {
+        let names = std::env::var("SNAP").unwrap_or_else(|_| "search".to_string());
+        let sizes: Vec<(u16, u16)> = std::env::var("SNAP_SIZES")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .filter_map(|s| {
+                        let (w, h) = s.split_once('x')?;
+                        Some((w.parse().ok()?, h.parse().ok()?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![(120, 40), (80, 24)]);
+        for name in names.split(',') {
+            for (w, h) in &sizes {
+                let mut app = App::new();
+                let (items, _) = app
+                    .cache
+                    .get_with_freshness::<Vec<crate::models::item::Item>>("items");
+                let (fields, _) = app
+                    .cache
+                    .get_with_freshness::<Vec<crate::models::field::Field>>("fields");
+                app.items = items.expect("no cached items - run git-tui once first");
+                app.fields = fields.unwrap_or_default();
+                app.current_user = app.config.current_user.clone();
+                app.board_sprint_filter = app.current_sprint_name();
+                assert!(live_scenario(&mut app, name), "unknown scenario {}", name);
+                print_screen(&mut app, name, *w, *h);
+            }
+        }
+    }
+
     /// `cargo test snapshot -- --ignored --nocapture`
     #[test]
     #[ignore]
