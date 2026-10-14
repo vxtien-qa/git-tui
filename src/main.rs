@@ -647,6 +647,16 @@ fn handle_event(app: &mut App, ev: Event) {
                 Popup::Error(_) | Popup::Success(_) => {
                     app.popup = Popup::None;
                 }
+                Popup::CopyResults => match key.code {
+                    KeyCode::Char('m') | KeyCode::Char('M') => {
+                        handlers::search::copy_results(app, handlers::search::CopyFormat::Markdown)
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        handlers::search::copy_results(app, handlers::search::CopyFormat::Slack)
+                    }
+                    KeyCode::Esc => app.popup = Popup::None,
+                    _ => {}
+                },
                 Popup::Confirm { on_confirm, .. } => match key.code {
                     KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                         let action = on_confirm.clone();
@@ -920,6 +930,15 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Popup::Error(msg) => ui::dialog::render_error(f, msg),
         Popup::Success(msg) => ui::dialog::render_success(f, msg),
         Popup::Confirm { title, message, .. } => ui::dialog::render_confirm(f, title, message),
+        Popup::CopyResults => ui::dialog::render_choice(
+            f,
+            "Copy results",
+            &format!("Copy {} result(s) as:", app.search_results.len()),
+            &[
+                ("m", "Markdown (GitHub, Notion)"),
+                ("s", "Slack (linked titles)"),
+            ],
+        ),
         Popup::None => {}
     }
 
@@ -1241,6 +1260,7 @@ mod render_tests {
                 "A long error message that has to wrap several times to prove the popup grows and never clips its dismiss hint.".to_string(),
             ),
             Popup::Success("Done".to_string()),
+            Popup::CopyResults,
             Popup::Confirm {
                 title: "Move 3 item(s)".to_string(),
                 message: "Move to In UAT?\n#401, #402, #403".to_string(),
@@ -1334,6 +1354,12 @@ mod snapshot_tool {
                 app.filter_label = vec!["!Ready-for-UAT".to_string()];
                 app.filter_assignee = vec![app.config.current_user.clone()];
                 app.apply_filters();
+            }
+            "search-copy" => {
+                app.screen = Screen::Search;
+                app.filter_status = vec!["In QA".to_string()];
+                app.apply_filters();
+                app.popup = Popup::CopyResults;
             }
             _ => return false,
         }

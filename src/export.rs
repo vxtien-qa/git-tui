@@ -2166,6 +2166,114 @@ pub fn item_to_markdown(item: &Item, owner: &str) -> String {
     r
 }
 
+// ─── Ticket lists ───────────────────────────────────────────────────────────
+
+/// The issue's web URL, when it has a number and a repository.
+fn issue_url(item: &Item) -> Option<String> {
+    let (num, repo) = (item.number?, item.repository.as_deref()?);
+    Some(if repo.starts_with("https://") {
+        format!("{}/issues/{}", repo, num)
+    } else {
+        format!("https://github.com/{}/issues/{}", repo, num)
+    })
+}
+
+/// The facts after a ticket in a copied list: `In QA, Sprint 31, @a @b`.
+fn list_meta(item: &Item, name: &dyn Fn(&str) -> String) -> String {
+    let mut parts = vec![item.status.label().to_string()];
+    if let Some(sprint) = item.sprint.as_deref() {
+        parts.push(sprint.to_string());
+    }
+    if !item.assignees.is_empty() {
+        let who: Vec<String> = item.assignees.iter().map(|a| name(a)).collect();
+        parts.push(who.join(" "));
+    }
+    parts.join(", ")
+}
+
+/// `#4224 Title` for a list line.
+fn list_label(item: &Item) -> String {
+    let title = clean_title(&item.title);
+    match item.number {
+        Some(n) => format!("#{} {}", n, title),
+        None => title,
+    }
+}
+
+/// Markdown link text: a title like `[FE] Copy changes` would otherwise close
+/// the link early.
+fn escape_md_link_text(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Tickets as a Markdown list, one linked line each, in the given order.
+///
+/// For GitHub and Notion. People are GitHub logins, which GitHub turns into
+/// mentions.
+pub fn ticket_list_md(items: &[Item], indices: &[usize]) -> String {
+    let login = |a: &str| format!("@{}", a);
+    indices
+        .iter()
+        .filter_map(|&i| items.get(i))
+        .map(|item| {
+            let label = list_label(item);
+            let head = match issue_url(item) {
+                Some(url) => format!("[{}]({})", escape_md_link_text(&label), url),
+                None => label,
+            };
+            format!("- {} - {}\n", head, list_meta(item, &login))
+        })
+        .collect()
+}
+
+/// Tickets as a list for Slack: (HTML with linked titles, plain-text fallback).
+///
+/// People are Slack display names from the user map where one exists, like
+/// the reports' copy formats, because a pasted `@login` pings nobody.
+pub fn ticket_list_rich(
+    items: &[Item],
+    indices: &[usize],
+    user_map: &std::collections::HashMap<String, crate::config::SlackUserMapping>,
+) -> (String, String) {
+    let name = |a: &str| resolve_display_name(a, user_map);
+    let mut html = String::from("<ul>");
+    let mut plain = String::new();
+    for item in indices.iter().filter_map(|&i| items.get(i)) {
+        let label = list_label(item);
+        let meta = list_meta(item, &name);
+        match issue_url(item) {
+            Some(url) => {
+                html.push_str(&format!(
+                    "<li><a href=\"{}\">{}</a> - {}</li>",
+                    escape_html(&url),
+                    escape_html(&label),
+                    escape_html(&meta)
+                ));
+                plain.push_str(&format!("• {} - {} - {}\n", label, meta, url));
+            }
+            None => {
+                html.push_str(&format!(
+                    "<li>{} - {}</li>",
+                    escape_html(&label),
+                    escape_html(&meta)
+                ));
+                plain.push_str(&format!("• {} - {}\n", label, meta));
+            }
+        }
+    }
+    html.push_str("</ul>");
+    (html, plain)
+}
+
 // ─── Clipboard ──────────────────────────────────────────────────────────────
 
 /// Copy text to system clipboard using arboard.
@@ -2174,6 +2282,20 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
         arboard::Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
     clipboard
         .set_text(text.to_string())
+        .map_err(|e| format!("Failed to copy to clipboard: {}", e))
+}
+
+/// Copy rich text (HTML) with a plain-text alternative.
+///
+/// Slack's message box keeps the links of pasted HTML but shows `<url|text>`
+/// markup literally - that syntax only works through the API - so a list
+/// meant for Slack goes on the clipboard as HTML. Apps that only take plain
+/// text get `plain`.
+pub fn copy_html_to_clipboard(html: &str, plain: &str) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
+    clipboard
+        .set_html(html, Some(plain))
         .map_err(|e| format!("Failed to copy to clipboard: {}", e))
 }
 
@@ -2542,6 +2664,63 @@ mod tests {
             "Ready for Release",
             &Status::Blocked
         ));
+    }
+
+    fn list_items() -> Vec<Item> {
+        vec![
+            Item {
+                id: "a".into(),
+                number: Some(4224),
+                repository: Some("Kinatico/kup-project-management".into()),
+                title: "[FE] Copy changes\nin <Activity> Library".into(),
+                status: Status::InQA,
+                sprint: Some("Sprint 31".into()),
+                assignees: vec!["vxtien-qa".into(), "dev-a".into()],
+                ..Default::default()
+            },
+            Item {
+                id: "b".into(),
+                title: "Draft idea".into(),
+                status: Status::Backlog,
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn test_ticket_list_md_links_each_ticket_in_order() {
+        let items = list_items();
+        let md = ticket_list_md(&items, &[1, 0]);
+        let lines: Vec<&str> = md.lines().collect();
+        assert_eq!(lines[0], "- Draft idea - Backlog");
+        // Brackets in the title are escaped so the link text doesn't end early.
+        assert_eq!(
+            lines[1],
+            "- [#4224 \\[FE\\] Copy changes in <Activity> Library](https://github.com/Kinatico/kup-project-management/issues/4224) - In QA, Sprint 31, @vxtien-qa @dev-a"
+        );
+    }
+
+    #[test]
+    fn test_ticket_list_rich_links_and_escapes_for_slack() {
+        let items = list_items();
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "vxtien-qa".to_string(),
+            crate::config::SlackUserMapping {
+                slack_id: "U1".into(),
+                slack_display: "Bruce Vu".into(),
+            },
+        );
+        let (html, plain) = ticket_list_rich(&items, &[0, 1], &map);
+        assert!(html.starts_with(
+            "<ul><li><a href=\"https://github.com/Kinatico/kup-project-management/issues/4224\">"
+        ));
+        assert!(html.contains("#4224 [FE] Copy changes in &lt;Activity&gt; Library</a> - In QA, Sprint 31, @Bruce Vu @dev-a</li>"));
+        assert!(html.ends_with("<li>Draft idea - Backlog</li></ul>"));
+        assert_eq!(
+            plain,
+            "• #4224 [FE] Copy changes in <Activity> Library - In QA, Sprint 31, @Bruce Vu @dev-a - https://github.com/Kinatico/kup-project-management/issues/4224\n• Draft idea - Backlog\n"
+        );
     }
 
     #[test]

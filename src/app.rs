@@ -157,6 +157,8 @@ pub enum Popup {
     },
     Error(String),
     Success(String),
+    /// Choose the format for copying the Search results.
+    CopyResults,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -128,6 +128,10 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         key_line(&arrows_lr, "Navigate options"),
         key_line("Space", "Toggle filter (include → exclude → off)"),
         key_line("Ctrl+L", "Clear all filters"),
+        key_line(
+            "Ctrl+Y",
+            "Copy results as a linked list: m = Markdown, s = Slack",
+        ),
         key_line("Esc", "Back (filters kept)"),
         Line::from(""),
         section("Bug / Enhancement / Task forms"),

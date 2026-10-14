@@ -13,6 +13,14 @@ pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
             clear_all_filters(app);
             app.set_status("Filters cleared");
         }
+        // Letter keys type into the keyword box, so copying takes Ctrl.
+        KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.search_results.is_empty() {
+                app.set_status("No results to copy");
+            } else {
+                app.popup = crate::app::Popup::CopyResults;
+            }
+        }
         KeyCode::Tab => {
             app.search_field_idx = (app.search_field_idx + 1) % FIELDS;
         }
@@ -113,6 +121,45 @@ pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
         }
         _ => {}
     }
+}
+
+/// Copy format for the Search results.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CopyFormat {
+    /// For GitHub and Notion.
+    Markdown,
+    /// Rich text with linked titles, for pasting into Slack.
+    Slack,
+}
+
+/// Copy every current Search result, in screen order, and say how it went.
+pub fn copy_results(app: &mut App, format: CopyFormat) {
+    let n = app.search_results.len();
+    let result = match format {
+        CopyFormat::Markdown => crate::export::copy_to_clipboard(&crate::export::ticket_list_md(
+            &app.items,
+            &app.search_results,
+        )),
+        CopyFormat::Slack => {
+            let (html, plain) = crate::export::ticket_list_rich(
+                &app.items,
+                &app.search_results,
+                &app.config.slack_user_map,
+            );
+            crate::export::copy_html_to_clipboard(&html, &plain)
+        }
+    };
+    app.popup = match result {
+        Ok(()) => crate::app::Popup::Success(format!(
+            "Copied {} result(s) as {}",
+            n,
+            match format {
+                CopyFormat::Markdown => "Markdown",
+                CopyFormat::Slack => "a Slack list (links kept when pasted)",
+            }
+        )),
+        Err(e) => crate::app::Popup::Error(e),
+    };
 }
 
 /// Reset the search query and every filter field.

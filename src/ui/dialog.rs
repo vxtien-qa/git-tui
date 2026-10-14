@@ -104,6 +104,42 @@ pub fn render_confirm(f: &mut Frame, title: &str, message: &str) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Render a pick-one popup: a message, then one `[key] label` row per choice.
+pub fn render_choice(f: &mut Frame, title: &str, message: &str, choices: &[(&str, &str)]) {
+    let popup_w = (f.area().width.saturating_sub(4)).min(50);
+    let inner_w = popup_w.saturating_sub(4) as usize;
+
+    let mut lines = vec![Line::from("")];
+    for line in wrap_message(message, inner_w) {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", line),
+            theme::normal(),
+        )));
+    }
+    lines.push(Line::from(""));
+    for (key, label) in choices {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  [{}] ", key), theme::highlight()),
+            Span::styled(label.to_string(), theme::normal()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  [Esc] ", theme::dim()),
+        Span::styled("Cancel", theme::dim()),
+    ]));
+
+    let max_h = f.area().height.saturating_sub(2);
+    let height = (lines.len() as u16 + 2).min(max_h);
+    let area = centered_rect(popup_w, height, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::title())
+        .title(Span::styled(format!(" {} ", title), theme::title()));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 /// Render an error popup.
 pub fn render_error(f: &mut Frame, message: &str) {
     let popup_w = (f.area().width.saturating_sub(4)).min(70);

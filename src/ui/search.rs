@@ -155,9 +155,12 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     // ── Footer ──
     let footer = super::utils::footer_line(
         &[
+            // The focused row already says how to move and toggle, so the
+            // keys it can't show come first and survive a narrow terminal.
             ("Tab", "Field"),
-            (theme::icon_left_right(), "Option"),
+            ("Ctrl+Y", "Copy list"),
             ("Space", "Toggle"),
+            (theme::icon_left_right(), "Option"),
             ("Enter", "Search/Open"),
             ("Ctrl+L", "Clear filters"),
             ("Esc", "Back"),
