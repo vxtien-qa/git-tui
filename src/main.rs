@@ -698,6 +698,34 @@ fn handle_event(app: &mut App, ev: Event) {
                 Popup::Error(_) | Popup::Success(_) => {
                     app.popup = Popup::None;
                 }
+                Popup::ConfirmSprint {
+                    choices,
+                    selected,
+                    on_confirm,
+                    ..
+                } => match key.code {
+                    KeyCode::Left | KeyCode::Right => {
+                        let n = choices.len().max(1);
+                        let next = if key.code == KeyCode::Right {
+                            (selected + 1) % n
+                        } else {
+                            (selected + n - 1) % n
+                        };
+                        if let Popup::ConfirmSprint { selected, .. } = &mut app.popup {
+                            *selected = next;
+                        }
+                    }
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        let sprint = choices.get(*selected).and_then(|c| c.sprint.clone());
+                        let action = on_confirm.clone().with_sprint(sprint);
+                        app.popup = Popup::None;
+                        handlers::actions::execute_confirm_action(app, &action);
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        app.popup = Popup::None;
+                    }
+                    _ => {}
+                },
                 Popup::SavePreset { .. } => {
                     handlers::search::handle_save_preset(app, key.code, key.modifiers)
                 }
@@ -989,6 +1017,13 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Popup::Error(msg) => ui::dialog::render_error(f, msg),
         Popup::Success(msg) => ui::dialog::render_success(f, msg),
         Popup::Confirm { title, message, .. } => ui::dialog::render_confirm(f, title, message),
+        Popup::ConfirmSprint {
+            title,
+            message,
+            choices,
+            selected,
+            ..
+        } => ui::dialog::render_confirm_sprint(f, title, message, choices, *selected),
         Popup::SavePreset { name } => ui::dialog::render_text_prompt(
             f,
             "Save filters",
@@ -1407,6 +1442,26 @@ mod render_tests {
             ),
             Popup::Success("Done".to_string()),
             Popup::CopyResults,
+            Popup::ConfirmSprint {
+                title: "Return - #4218".to_string(),
+                message: "Move back to In Progress + comment tagging the devs?\nBoth Ready-for-* labels are cleared, so the ticket needs a full re-verify.".to_string(),
+                choices: vec![
+                    crate::app::SprintChoice {
+                        label: "Keep (Sprint 30)".to_string(),
+                        sprint: None,
+                    },
+                    crate::app::SprintChoice {
+                        label: "Today (Sprint 31)".to_string(),
+                        sprint: Some("Sprint 31".to_string()),
+                    },
+                    crate::app::SprintChoice {
+                        label: "Next (Sprint 32)".to_string(),
+                        sprint: Some("Sprint 32".to_string()),
+                    },
+                ],
+                selected: 1,
+                on_confirm: ConfirmAction::Quit,
+            },
             Popup::SavePreset {
                 name: "A filter name long enough to scroll inside the prompt box".to_string(),
             },
@@ -1642,6 +1697,21 @@ mod snapshot_tool {
                     );
                 } else {
                     app.screen = Screen::QaActions(idx);
+                }
+            }
+            // Return's sprint picker over a real ticket.
+            "return-sprint" => {
+                let Some(idx) = app
+                    .items
+                    .iter()
+                    .position(|i| i.status == crate::models::status::Status::InQA)
+                else {
+                    return false;
+                };
+                app.screen = Screen::QaActions(idx);
+                handlers::detail::handle_qa_actions(app, KeyCode::Char('r'), idx);
+                if let Popup::ConfirmSprint { selected, .. } = &mut app.popup {
+                    *selected = 1;
                 }
             }
             "search-copy" => {

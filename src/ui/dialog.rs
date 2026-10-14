@@ -104,6 +104,89 @@ pub fn render_confirm(f: &mut Frame, title: &str, message: &str) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Render a confirm with a sprint selector (←/→) under the message.
+pub fn render_confirm_sprint(
+    f: &mut Frame,
+    title: &str,
+    message: &str,
+    choices: &[crate::app::SprintChoice],
+    selected: usize,
+) {
+    let popup_w = (f.area().width.saturating_sub(4)).min(64);
+    let inner_w = popup_w.saturating_sub(4) as usize;
+
+    let mut lines = vec![Line::from("")];
+    for line in wrap_message(message, inner_w) {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", line),
+            theme::normal(),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("  Sprint:", theme::dim())));
+    // Chips wrap so every choice stays visible on a narrow terminal.
+    let mut row: Vec<Span> = vec![Span::raw("  ")];
+    let mut row_w = 2;
+    for (i, choice) in choices.iter().enumerate() {
+        let is_sel = i == selected;
+        let chip = if is_sel {
+            format!(
+                "{} {} {}",
+                theme::icon_left_arrow(),
+                choice.label,
+                theme::icon_right_arrow()
+            )
+        } else {
+            format!("  {}  ", choice.label)
+        };
+        let w = chip.chars().count() + 1;
+        if row_w + w > inner_w && row_w > 2 {
+            lines.push(Line::from(std::mem::take(&mut row)));
+            row = vec![Span::raw("  ")];
+            row_w = 2;
+        }
+        row.push(Span::styled(
+            chip,
+            if is_sel {
+                theme::selected()
+            } else {
+                theme::dim()
+            },
+        ));
+        row.push(Span::raw(" "));
+        row_w += w;
+    }
+    lines.push(Line::from(row));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  [Enter/y] ", theme::highlight()),
+        Span::styled("Confirm", theme::normal()),
+        Span::raw("  "),
+        Span::styled(
+            format!(
+                "[{}/{}] ",
+                theme::icon_left_arrow(),
+                theme::icon_right_arrow()
+            ),
+            theme::highlight(),
+        ),
+        Span::styled("Sprint", theme::normal()),
+        Span::raw("  "),
+        Span::styled("[Esc/n] ", theme::dim()),
+        Span::styled("Cancel", theme::dim()),
+    ]));
+
+    let max_h = f.area().height.saturating_sub(2);
+    let height = (lines.len() as u16 + 2).min(max_h);
+    let area = centered_rect(popup_w, height, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::title())
+        .title(Span::styled(format!(" {} ", title), theme::title()));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 /// Render a pick-one popup: a message, then one `[key] label` row per choice.
 pub fn render_choice(f: &mut Frame, title: &str, message: &str, choices: &[(&str, &str)]) {
     let popup_w = (f.area().width.saturating_sub(4)).min(50);

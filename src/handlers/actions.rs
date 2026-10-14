@@ -436,10 +436,11 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
             });
         }
 
-        ConfirmAction::Return(item_idx) => {
+        ConfirmAction::Return { idx, sprint } => {
             handle_return_action(
                 app,
-                *item_idx,
+                *idx,
+                sprint.as_deref(),
                 slack_url,
                 slack_user,
                 slack_notify,
@@ -788,9 +789,21 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                 }
             });
         }
-        ConfirmAction::SubmitBugReport(parent_idx, is_fail) => {
+        ConfirmAction::SubmitBugReport(parent_idx, is_fail, parent_sprint) => {
             let parent_idx = *parent_idx;
             let is_fail = *is_fail;
+            // Only a failed parent changes sprint.
+            let parent_sprint_move = if is_fail {
+                match sprint_move_params(app, parent_sprint.as_deref()) {
+                    Ok(params) => params,
+                    Err(e) => {
+                        app.popup = Popup::Error(format!("Fail: {}", e));
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
             let priorities = ["--", "P0", "P1", "P2", "P3", "P4"];
             let stacks = ["--", "FE", "BE", "App UI", "App BE"];
             let envs = crate::app::App::BUG_ENVS;
@@ -1145,11 +1158,24 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                                 ));
                             }
 
+                            let mut moving = "Moving back to In Progress.".to_string();
+                            if let Some(m) = &parent_sprint_move {
+                                match gh::item::edit_iteration_field(
+                                    &parent_item_id,
+                                    &m.project_id,
+                                    &m.field_id,
+                                    &m.option_id,
+                                ) {
+                                    Ok(()) => {
+                                        moving =
+                                            format!("Moving back to In Progress and to {}.", m.name)
+                                    }
+                                    Err(e) => warnings
+                                        .push(format!("✗ Parent not moved to {}: {}", m.name, e)),
+                                }
+                            }
                             let comment = comment_with_cc(
-                                &format!(
-                                    "QA found a new bug on this ticket: {}\nMoving back to In Progress.",
-                                    url
-                                ),
+                                &format!("QA found a new bug on this ticket: {}\n{}", url, moving),
                                 &dev_mentions.join(" "),
                             );
                             if let Err(e) =
@@ -1514,6 +1540,7 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
 fn handle_return_action(
     app: &mut App,
     item_idx: usize,
+    sprint: Option<&str>,
     slack_url: Option<String>,
     slack_user: String,
     slack_notify: crate::config::SlackNotifyConfig,
@@ -1539,10 +1566,24 @@ fn handle_return_action(
         return;
     };
 
+    let sprint_move = match sprint_move_params(app, sprint) {
+        Ok(params) => params,
+        Err(e) => {
+            app.popup = Popup::Error(format!("Return: {}", e));
+            return;
+        }
+    };
     let dev_mentions: Vec<String> = devs.iter().map(|d| format!("@{}", d)).collect();
     // Wording works for bug tickets and feature tickets alike.
     let comment = comment_with_cc(
-        "QA verification failed - issue not resolved. Returning to In Progress.",
+        &match &sprint_move {
+            Some(m) => format!(
+                "QA verification failed - issue not resolved. Returning to In Progress and moving to {}.",
+                m.name
+            ),
+            None => "QA verification failed - issue not resolved. Returning to In Progress."
+                .to_string(),
+        },
         &dev_mentions.join(" "),
     );
 
@@ -1567,6 +1608,9 @@ fn handle_return_action(
     // Optimistic local move (reverted via ParentStatusChanged on abort).
     if let Some(item) = app.items.get_mut(item_idx) {
         item.status = Status::InProgress;
+        if let Some(m) = &sprint_move {
+            item.sprint = Some(m.name.clone());
+        }
     }
 
     let tx = app.action_tx.clone();
@@ -1598,7 +1642,17 @@ fn handle_return_action(
         // retested ticket vanish from My Tasks and blocked the next pass.
         let (cleared, clear_failed) =
             strip_handoff_labels(&tx, &item_id, &repo, number, &stale_labels);
-        let label_note = handoff_note(&cleared, &clear_failed);
+        let mut label_note = handoff_note(&cleared, &clear_failed);
+        if let Some(m) = &sprint_move {
+            match gh::item::edit_iteration_field(&item_id, &m.project_id, &m.field_id, &m.option_id)
+            {
+                Ok(()) => label_note.push_str(&format!(", ✓ moved to {}", m.name)),
+                Err(e) => label_note.push_str(&format!(
+                    ", ✗ could not move to {} ({}) - set the Sprint on GitHub",
+                    m.name, e
+                )),
+            }
+        }
 
         match gh::issue::comment(&repo, number, &comment) {
             Ok(()) => {
@@ -1635,6 +1689,38 @@ fn handle_return_action(
             }
         }
     });
+}
+
+/// Everything a worker needs to put a ticket into another sprint.
+struct SprintMove {
+    project_id: String,
+    field_id: String,
+    option_id: String,
+    name: String,
+}
+
+/// Resolve the sprint picked in a Fail / Return confirm. `None` in, `None`
+/// out (keep the sprint); an error when the sprint can't be written.
+fn sprint_move_params(app: &App, sprint: Option<&str>) -> Result<Option<SprintMove>, String> {
+    let Some(name) = sprint else {
+        return Ok(None);
+    };
+    let field = app
+        .sprint_field()
+        .ok_or_else(|| "the Sprint field is not loaded - refresh and retry".to_string())?;
+    let option = field
+        .find_option(name)
+        .ok_or_else(|| format!("'{}' is not an iteration of the Sprint field", name))?;
+    let project_id = app
+        .project_id
+        .clone()
+        .ok_or_else(|| "project fields not loaded yet - refresh and retry".to_string())?;
+    Ok(Some(SprintMove {
+        project_id,
+        field_id: field.id.clone(),
+        option_id: option.id.clone(),
+        name: option.name.clone(),
+    }))
 }
 
 /// One ticket in a Pass UAT batch, resolved before the worker starts.

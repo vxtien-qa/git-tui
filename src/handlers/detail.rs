@@ -124,6 +124,33 @@ fn guarded_confirm(
     }
 }
 
+/// Confirm an action that sends `item_idx` back, with a sprint to pick when
+/// there is more than one place for it to go (Keep, Today, Next).
+pub fn confirm_with_sprint(
+    app: &mut App,
+    item_idx: usize,
+    title: String,
+    message: String,
+    on_confirm: ConfirmAction,
+) {
+    let choices = app.sprint_choices(item_idx);
+    app.popup = if choices.len() > 1 {
+        Popup::ConfirmSprint {
+            title,
+            message,
+            choices,
+            selected: 0,
+            on_confirm,
+        }
+    } else {
+        Popup::Confirm {
+            title,
+            message,
+            on_confirm,
+        }
+    };
+}
+
 /// Candidates for Bulk verify UAT: every ticket In UAT in the active sprint.
 ///
 /// A UAT run verifies everything deployed there at once, so passing it one
@@ -230,14 +257,27 @@ fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
         // Return lives only in the QA Actions menu - on ItemDetail `r` is
         // reserved for reload so refresh muscle-memory can't demote a ticket.
         KeyCode::Char('r') if !matches!(app.screen, Screen::ItemDetail(_)) => {
-            guarded_confirm(
-                app,
-                item_idx,
-                PassKind::Return,
-                "Return",
-                "Move back to In Progress + comment tagging the devs?\nBoth Ready-for-* labels are cleared, so the ticket needs a full re-verify.",
-                ConfirmAction::Return(item_idx),
-            );
+            match qa_pass_allowed(app, item_idx, PassKind::Return) {
+                Ok(()) => {
+                    let num = app
+                        .items
+                        .get(item_idx)
+                        .and_then(|i| i.number)
+                        .map(|n| format!("#{}", n))
+                        .unwrap_or_default();
+                    confirm_with_sprint(
+                        app,
+                        item_idx,
+                        format!("Return - {}", num),
+                        "Move back to In Progress + comment tagging the devs?\nBoth Ready-for-* labels are cleared, so the ticket needs a full re-verify.".to_string(),
+                        ConfirmAction::Return {
+                            idx: item_idx,
+                            sprint: None,
+                        },
+                    );
+                }
+                Err(msg) => app.popup = Popup::Error(msg),
+            }
             true
         }
         KeyCode::Char('f') => {

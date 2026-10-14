@@ -58,10 +58,18 @@ pub fn remap_screen_indices(app: &mut crate::app::App, old_items: &[Item]) {
     // Remap indices held by an open Confirm popup. Without this, a background
     // refresh that reorders `items` while the popup is open would make Enter
     // execute the action against whatever item now sits at the stale index.
-    if let Popup::Confirm { on_confirm, .. } = &app.popup {
-        match remap_confirm_action(on_confirm, old_items, &app.items) {
+    let pending = match &app.popup {
+        Popup::Confirm { on_confirm, .. } | Popup::ConfirmSprint { on_confirm, .. } => {
+            Some(remap_confirm_action(on_confirm, old_items, &app.items))
+        }
+        _ => None,
+    };
+    if let Some(remapped) = pending {
+        match remapped {
             Some(remapped) => {
-                if let Popup::Confirm { on_confirm, .. } = &mut app.popup {
+                if let Popup::Confirm { on_confirm, .. } | Popup::ConfirmSprint { on_confirm, .. } =
+                    &mut app.popup
+                {
                     *on_confirm = remapped;
                 }
             }
@@ -103,7 +111,10 @@ fn remap_confirm_action(
                 })
             }
         }
-        ConfirmAction::Return(idx) => remap(*idx).map(ConfirmAction::Return),
+        ConfirmAction::Return { idx, sprint } => remap(*idx).map(|n| ConfirmAction::Return {
+            idx: n,
+            sprint: sprint.clone(),
+        }),
         ConfirmAction::PostComment(idx) => remap(*idx).map(ConfirmAction::PostComment),
         ConfirmAction::ClearHandoffLabels(idx) => {
             remap(*idx).map(ConfirmAction::ClearHandoffLabels)
@@ -120,12 +131,12 @@ fn remap_confirm_action(
             }
         }
         // A fail-flow bug report needs its parent; cancel if the parent vanished.
-        ConfirmAction::SubmitBugReport(Some(idx), is_fail) => {
-            remap(*idx).map(|n| ConfirmAction::SubmitBugReport(Some(n), *is_fail))
+        ConfirmAction::SubmitBugReport(Some(idx), is_fail, sprint) => {
+            remap(*idx).map(|n| ConfirmAction::SubmitBugReport(Some(n), *is_fail, sprint.clone()))
         }
-        ConfirmAction::SubmitBugReport(None, is_fail) => {
-            Some(ConfirmAction::SubmitBugReport(None, *is_fail))
-        }
+        ConfirmAction::SubmitBugReport(None, is_fail, sprint) => Some(
+            ConfirmAction::SubmitBugReport(None, *is_fail, sprint.clone()),
+        ),
         ConfirmAction::SubmitTask(Some(idx)) => {
             remap(*idx).map(|n| ConfirmAction::SubmitTask(Some(n)))
         }

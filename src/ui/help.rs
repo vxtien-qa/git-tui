@@ -42,6 +42,10 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         section("Confirm popups"),
         key_line("Enter / y", "Confirm the action"),
         key_line("Esc / n", "Cancel (other keys are ignored)"),
+        key_line(
+            &arrows_lr,
+            "Return / Fail: pick the sprint - Keep, Today, Next",
+        ),
         Line::from(""),
         section("Menu"),
         key_line("1-6", "Quick jump to screen"),

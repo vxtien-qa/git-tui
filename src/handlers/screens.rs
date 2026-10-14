@@ -703,11 +703,21 @@ pub fn handle_bug_report(
             } else {
                 headline
             };
-            app.popup = Popup::Confirm {
-                title: format!("Submit {}", kind.form_title()),
-                message,
-                on_confirm: ConfirmAction::SubmitBugReport(parent_idx, is_fail),
-            };
+            let title = format!("Submit {}", kind.form_title());
+            let on_confirm = ConfirmAction::SubmitBugReport(parent_idx, is_fail, None);
+            match parent_idx.filter(|_| is_fail) {
+                // Failing a ticket sends it back: offer to move its sprint.
+                Some(parent) => crate::handlers::detail::confirm_with_sprint(
+                    app, parent, title, message, on_confirm,
+                ),
+                None => {
+                    app.popup = Popup::Confirm {
+                        title,
+                        message,
+                        on_confirm,
+                    }
+                }
+            }
         }
         KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
             if let Ok(text) = crate::export::read_from_clipboard() {

@@ -178,6 +178,14 @@ pub enum Popup {
     },
     Error(String),
     Success(String),
+    /// A confirm with a sprint to pick (←/→) for the ticket being sent back.
+    ConfirmSprint {
+        title: String,
+        message: String,
+        choices: Vec<SprintChoice>,
+        selected: usize,
+        on_confirm: ConfirmAction,
+    },
     /// Choose the format for copying the Search results.
     CopyResults,
     /// Name the current Search filters to save them.
@@ -206,12 +214,18 @@ pub enum ConfirmAction {
         indices: Vec<usize>,
         bulk: bool,
     },
-    Return(usize),
+    /// Back to In Progress; `sprint` moves the ticket to that sprint too.
+    Return {
+        idx: usize,
+        sprint: Option<String>,
+    },
     MoveItems {
         indices: Vec<usize>,
         target: Status,
     },
-    SubmitBugReport(Option<usize>, bool),
+    /// File the report form: (parent, is_fail, sprint for the parent when
+    /// failing it - `None` keeps the parent's sprint).
+    SubmitBugReport(Option<usize>, bool, Option<String>),
     SubmitTask(Option<usize>),
     PostComment(usize),
     /// Strip stale Ready-for-* handoff labels so a returned ticket becomes
@@ -225,6 +239,28 @@ pub enum ConfirmAction {
     /// Delete a saved Search filter, by name.
     DeleteSearchPreset(String),
     Quit,
+}
+
+/// One sprint option when sending a ticket back (Fail, Return).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SprintChoice {
+    /// `Keep (Sprint 30)`, `Today (Sprint 31)`, `Next (Sprint 32)`.
+    pub label: String,
+    /// The sprint to move to; `None` keeps the ticket where it is.
+    pub sprint: Option<String>,
+}
+
+impl ConfirmAction {
+    /// The action with the sprint picked in a `ConfirmSprint` popup.
+    pub fn with_sprint(self, sprint: Option<String>) -> Self {
+        match self {
+            ConfirmAction::Return { idx, .. } => ConfirmAction::Return { idx, sprint },
+            ConfirmAction::SubmitBugReport(parent, is_fail, _) => {
+                ConfirmAction::SubmitBugReport(parent, is_fail, sprint)
+            }
+            other => other,
+        }
+    }
 }
 
 /// Event sent from background refresh thread
@@ -762,6 +798,48 @@ impl App {
             .filter(|(_, checked)| *checked)
             .filter_map(|(id, _)| self.items.iter().position(|i| &i.id == id))
             .collect()
+    }
+
+    /// Where a ticket sent back (Fail, Return) can go: keep its sprint, the
+    /// sprint running today, or the one after. Choices naming the same sprint
+    /// collapse; without iteration dates only Keep is offered.
+    pub fn sprint_choices(&self, item_idx: usize) -> Vec<SprintChoice> {
+        self.sprint_choices_on(item_idx, self.today_local())
+    }
+
+    /// `sprint_choices` for an explicit date (the testable seam).
+    pub fn sprint_choices_on(&self, item_idx: usize, today: NaiveDate) -> Vec<SprintChoice> {
+        let current = self.items.get(item_idx).and_then(|i| i.sprint.clone());
+        let mut choices = vec![SprintChoice {
+            label: format!("Keep ({})", current.as_deref().unwrap_or("no sprint")),
+            sprint: None,
+        }];
+        let Some(field) = self.sprint_field().filter(|f| f.has_iteration_dates()) else {
+            return choices;
+        };
+        let now = field.iteration_for_date(today);
+        let after = now.and_then(|o| o.start_date).unwrap_or(today);
+        let next = field
+            .options
+            .iter()
+            .filter(|o| o.start_date.is_some_and(|d| d > after))
+            .min_by_key(|o| o.start_date);
+        for (label, opt) in [("Today", now), ("Next", next)] {
+            let Some(opt) = opt else {
+                continue;
+            };
+            let taken = current.as_deref() == Some(opt.name.as_str())
+                || choices
+                    .iter()
+                    .any(|c| c.sprint.as_deref() == Some(opt.name.as_str()));
+            if !taken {
+                choices.push(SprintChoice {
+                    label: format!("{} ({})", label, opt.name),
+                    sprint: Some(opt.name.clone()),
+                });
+            }
+        }
+        choices
     }
 
     /// The UAT verdict of a ticket's deploy check, if one ran this session:
@@ -2441,6 +2519,85 @@ mod tests {
         let mut app = App::new();
         app.fields = vec![sprint_field_fixture()];
         app
+    }
+
+    #[test]
+    fn test_sprint_choices_keep_today_next() {
+        let mut app = app_with_sprint_field();
+        app.items = vec![
+            Item {
+                sprint: Some("Sprint 28".into()),
+                ..Default::default()
+            },
+            Item {
+                sprint: Some("Sprint 29".into()),
+                ..Default::default()
+            },
+            Item::default(),
+        ];
+        // Sep 16, 2026 sits in Sprint 29 (Sep 14 - Sep 27).
+        let day = NaiveDate::from_ymd_opt(2026, 9, 16).unwrap();
+        let labels = |idx: usize| -> Vec<(String, Option<String>)> {
+            app.sprint_choices_on(idx, day)
+                .into_iter()
+                .map(|c| (c.label, c.sprint))
+                .collect()
+        };
+        // A carried-over ticket: keep, today's sprint, or the next one.
+        assert_eq!(
+            labels(0),
+            vec![
+                ("Keep (Sprint 28)".to_string(), None),
+                (
+                    "Today (Sprint 29)".to_string(),
+                    Some("Sprint 29".to_string())
+                ),
+                (
+                    "Next (Sprint 30)".to_string(),
+                    Some("Sprint 30".to_string())
+                ),
+            ]
+        );
+        // Already in today's sprint: Today collapses into Keep.
+        assert_eq!(
+            labels(1),
+            vec![
+                ("Keep (Sprint 29)".to_string(), None),
+                (
+                    "Next (Sprint 30)".to_string(),
+                    Some("Sprint 30".to_string())
+                ),
+            ]
+        );
+        assert_eq!(labels(2)[0].0, "Keep (no sprint)");
+
+        // No iteration dates: only Keep.
+        let mut bare = App::new();
+        bare.items = app.items.clone();
+        assert_eq!(bare.sprint_choices_on(0, day).len(), 1);
+    }
+
+    #[test]
+    fn test_with_sprint_carries_the_pick_into_the_action() {
+        let a = ConfirmAction::Return {
+            idx: 3,
+            sprint: None,
+        }
+        .with_sprint(Some("Sprint 31".into()));
+        assert_eq!(
+            a,
+            ConfirmAction::Return {
+                idx: 3,
+                sprint: Some("Sprint 31".into())
+            }
+        );
+        let b = ConfirmAction::SubmitBugReport(Some(2), true, None).with_sprint(None);
+        assert_eq!(b, ConfirmAction::SubmitBugReport(Some(2), true, None));
+        // Actions without a sprint are left alone.
+        assert_eq!(
+            ConfirmAction::Quit.with_sprint(Some("x".into())),
+            ConfirmAction::Quit
+        );
     }
 
     #[test]
