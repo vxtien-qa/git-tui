@@ -64,7 +64,7 @@ branch. Deduplicated by url, sorted by repository then number.
 `Vec<LinkedPr>`. Cached `items.json` stores it as `[]`, which still
 deserializes. Copy as Markdown (`y` in Item Detail) keeps listing the PR URLs.
 
-Item Detail renders one line per PR under `-- Linked PRs (n) --`:
+Item Detail renders each PR under `-- Linked PRs (n) --` (shown here on one line; as built, the title and the environment marks go on lines of their own):
 
 ```
 marvelx-web#3793        merged -> develop   dev ✓  stg ✓  uat ?  prod ✗
@@ -84,7 +84,8 @@ For each merged PR, for each environment branch, on a worker thread:
 | `identical`, `behind` | ✓ | the merge commit is in the branch |
 | `ahead` | ✗ | the branch is an ancestor of the commit: not deployed |
 | `diverged` | ? | not in the branch's history, but the code may have arrived by cherry-pick (the FE `deploy-production-sNN` flow does this) |
-| 404 or any error | - | branch missing or check failed; the error is shown in the status bar |
+| 404 | - | GitHub found no such branch, commit or repository |
+| any other error | ! | the check failed; the error is shown (status bar while a popup waits on the user) |
 
 Never print "not deployed" for `?`: a cherry-picked or bundled change is
 common, and saying "not deployed" when the code is live would mislead.
@@ -100,8 +101,10 @@ the column order is kept):
 ```
 
 All five main code repositories have these four branches (checked
-2026-10-14). Results are kept in memory for the session, keyed by
-`repo#number`, so the Move to In UAT list can show them.
+2026-10-14). Results are kept in memory for the session, keyed by PR URL, so
+the Move to In UAT list can show them. In that list, `d` deploy-checks every
+row (four tickets at a time, reading linked PRs first where needed), and its
+UAT column is ✓ only when every open or merged linked PR is merged and on UAT.
 
 Open and closed-unmerged PRs are listed but not checked. A ticket whose PRs
 were looked up and none found shows "none linked on GitHub": GitHub only links
@@ -242,7 +245,8 @@ before the Slack message, as it already does when the QA leaves `--`.
 | `d` | Item Detail | Deploy check of linked PRs |
 | `U` | Item Detail, QA Actions | Pass UAT, this ticket |
 | `V` | Item Detail, QA Actions | Bulk verify UAT |
-| `I` | Item Detail, QA Actions | Move to In UAT |
+| `I` | Item Detail, QA Actions, My Tasks (Waiting for deploy rows) | Move to In UAT |
+| `d` | Pick lists | Deploy check every row |
 | ←/→ | Return and Fail confirm popups | Choose the sprint |
 | `Space`, `a`, `Enter` | Checklist screen | Toggle row, toggle all, confirm |
 | `Ctrl+S`, `Ctrl+O` | Search | Save filters, open saved filters |
@@ -295,6 +299,18 @@ Unit tests:
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
 `cargo test --all-targets` pass, as the release workflow requires.
 
+## After review (2026-10-14)
+
+Three independent reviews found bugs and gaps; all were fixed in checkpoints
+11 to 14: interactive popups protected from background results, the Return
+comment written after the sprint write, execute-time guards for the batches,
+failed linked-PR lookups reported, the Slack toggle list scrolling, My Tasks
+waiting rows selectable with `I` and `x`, `d` in pick lists, a contextual
+Item Detail footer (`U`/`V` on In UAT, `I` or `P` on In QA), and Help wrapping
+its descriptions. The live-status re-read before each write still lets the
+write through when the read itself fails, as it did before this work (a
+decision from the July audit: an unreliable network must not block QA).
+
 ## Checkpoints
 
 Work lands as one commit per step on `feat/v3.3.0-uat-cycle-board-query`,
@@ -316,6 +332,10 @@ the footers, so the QA can stop at any tag and test by hand. To drop a step:
 | `cp/08-move-to-uat` | Move to In UAT |
 | `cp/09-sprint-choice` | Sprint choice on Fail and Return |
 | `cp/10-docs-ui` | README, CHANGELOG, UI verification fixes |
+| `cp/11-review-fixes` | Bugs found in review |
+| `cp/12-review-risks` | Risks found in review |
+| `cp/13-design-gaps` | My Tasks waiting rows, `d` in pick lists, contextual footer |
+| `cp/14-docs-ui` | Help wrapping, small-terminal popups, docs |
 
 ## Release
 

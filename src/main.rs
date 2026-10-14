@@ -750,6 +750,7 @@ fn handle_event(app: &mut App, ev: Event) {
                     | Screen::Settings
                     | Screen::Notifications
                     | Screen::Help
+                    | Screen::BatchPicker(_)
                     | Screen::Menu
             );
             if scrollable && app.popup == Popup::None {
@@ -1551,7 +1552,7 @@ mod render_tests {
                 on_confirm: ConfirmAction::Quit,
             },
         ];
-        for (w, h) in [(60u16, 10u16), (80, 24), (200, 60)] {
+        for (w, h) in [(40u16, 8u16), (60, 10), (80, 24), (100, 30), (200, 60)] {
             for popup in &popups {
                 let mut app = app_with_items();
                 app.config.search_presets = (0..8)

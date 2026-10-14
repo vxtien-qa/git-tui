@@ -73,7 +73,7 @@ impl SlackNotifyConfig {
     pub const LABELS: [&str; 12] = [
         "Pass Dev",
         "Pass STG",
-        "Pass UAT",
+        "Pass UAT (U, V)",
         "Return (Fail)",
         "Bug Report",
         "Enhancement",

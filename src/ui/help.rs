@@ -19,6 +19,36 @@ fn section(title: &str) -> Line<'static> {
     Line::from(Span::styled(format!("  {}", title), theme::title()))
 }
 
+/// Wrap two-span rows (a key or label, then its description) that are wider
+/// than `width`: continuation lines start under the description.
+fn wrap_key_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
+        if line.spans.len() != 2 || total <= width {
+            out.push(line);
+            continue;
+        }
+        let key = line.spans[0].clone();
+        let desc = line.spans[1].clone();
+        let indent = key.content.width();
+        let room = width.saturating_sub(indent).max(10);
+        for (i, part) in super::utils::word_wrap(&desc.content, room)
+            .into_iter()
+            .enumerate()
+        {
+            let lead = if i == 0 {
+                key.clone()
+            } else {
+                Span::raw(" ".repeat(indent))
+            };
+            out.push(Line::from(vec![lead, Span::styled(part, desc.style)]));
+        }
+    }
+    out
+}
+
 /// Render help as a full content panel with scroll support.
 pub fn render(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
@@ -210,6 +240,12 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
     ];
+
+    // Wrap long descriptions under their own column instead of letting the
+    // panel edge cut them off: at 80x24 the description column is about 38
+    // characters, and a third of the lines were clipped mid-word.
+    let inner_w = chunks[0].width.saturating_sub(2) as usize;
+    let lines = wrap_key_lines(lines, inner_w);
 
     // Apply scroll
     let visible: Vec<Line> = lines.into_iter().skip(app.help_scroll).collect();

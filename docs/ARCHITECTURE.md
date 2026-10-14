@@ -18,6 +18,7 @@ src/
   models/          Domain types, no IO
     item.rs        Item, Comment, ItemKind
     status.rs      The 11 board columns
+    root.rs        Root of a ticket's sub-issue chain, for reports and Search
     field.rs       Project field and option definitions, iteration windows
     project.rs     Project metadata
 
@@ -26,7 +27,8 @@ src/
     sync.rs        Paginated GraphQL fetch of all project items
     field.rs       GraphQL fetch of project fields, including iterations
     timeline.rs    Batched GraphQL timeline fetch
-    issue.rs       Issue create, comment, label, node id, issue type, sub-issue
+    issue.rs       Issue create, comment, label, node id, issue type, sub-issue,
+                   linked PRs, deploy check (compare against a branch)
     item.rs        Project item field edits, live status and priority reads
     auth.rs        gh installation, login and scope checks
     project.rs     Project id lookup
@@ -36,7 +38,8 @@ src/
     screens.rs     Menu, setup, settings, forms, Slack screens
     board.rs       Board and My Tasks navigation
     detail.rs      Item detail, QA action guards, move dialog, history
-    search.rs      Search field and filters
+    search.rs      Search field and filters, saved filters, copy results
+    batch.rs       Pick lists for batch QA actions
     actions.rs     Executes confirmed actions: every GitHub write lives here
     helpers.rs     Index remapping after a refresh, repo splitting
 
@@ -159,6 +162,12 @@ it in `handlers::helpers`.
 **A QA action.** Add a `ConfirmAction` variant, a guard arm in
 `qa_pass_allowed`, a trigger in `handlers::detail`, execution in
 `handlers::actions`, a row in `ui::qa_actions`, and remapping in
+`handlers::helpers`.
+
+**A popup.** Add a `Popup` variant, its keys in `main`'s popup branch, a
+renderer in `ui::dialog`, and an entry in `every_popup_renders_at_every_size`.
+If it waits on the user, list it in `Popup::is_interactive`, or a background
+result will replace it. If it holds a `ConfirmAction`, remap it in
 `handlers::helpers`.
 
 **An item field.** Add it to `models::item::Item`, request it in

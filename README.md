@@ -162,11 +162,17 @@ sprint running today, or to the next one (arrow keys in the confirm). Keep is
 the default.
 
 Before moving a ticket to In UAT, `d` in the ticket view checks its linked PRs
-against the deploy branches. `✓` means the branch has the PR's merge commit,
-`✗` that it does not, and `?` that the commit is not in the branch's history
-but the change may have arrived by cherry-pick, so it is never read as "not
-deployed". A ticket only shows the PRs GitHub links to it; one whose PR was
-never linked shows "none linked on GitHub".
+against the deploy branches, and `d` in the Move to In UAT list checks every
+ticket in it. `✓` means the branch has the PR's merge commit, `✗` that it does
+not, and `?` that the commit is not in the branch's history but the change may
+have arrived by cherry-pick, so it is never read as "not deployed". `-` means
+GitHub found no such branch, commit or repository, and `!` that the check
+failed. The list's UAT column is `✓` only when every open or merged linked PR
+is merged and on UAT. A ticket only shows the PRs GitHub links to it; one whose
+PR was never linked shows "none linked on GitHub".
+
+The tickets waiting for a UAT deploy are listed in My Tasks under Waiting for
+deploy; `I` on one of them opens Move to In UAT.
 
 Each action is only offered from the column it belongs to. The QA actions menu
 (`p`) lists them all and dims the ones that do not apply, with the reason.
@@ -208,6 +214,7 @@ Each action is only offered from the column it belongs to. The QA actions menu
 | `m` | Move, with arrows and `Enter` or the digit shortcuts |
 | `s` | Cycle the sprint filter |
 | `r` | Refresh |
+| `I`, `x` | My Tasks, on a Waiting for deploy row: Move to In UAT, clear stale handoff labels |
 
 ### Item detail
 
@@ -234,17 +241,25 @@ Each action is only offered from the column it belongs to. The QA actions menu
 | Left, Right | Move between a row's options |
 | `Space` | Include, exclude, off |
 | `Ctrl+Y` | Copy the results: `m` Markdown, `s` Slack |
-| `Ctrl+S`, `Ctrl+O` | Save the filters under a name, open the saved ones |
+| `Ctrl+S`, `Ctrl+O` | Save the filters under a name, open the saved ones (`Enter` loads, `d` deletes) |
 | `Ctrl+L` | Clear the filters |
 
-### Pick lists and confirms
+### Pick lists (Bulk verify UAT, Move to In UAT)
 
 | Key | Action |
 | --- | --- |
-| `Space`, `a` | Check a ticket, check all or none (Bulk verify UAT, Move to In UAT) |
-| `Enter` | Confirm the checked tickets |
+| `Space`, `a` | Check a ticket, check all or none |
+| `d` | Deploy check every ticket in the list; the UAT column fills in |
+| `Enter` | Confirm the checked tickets (asks first) |
+| `Esc` | Back without doing anything |
+
+### Confirm popups
+
+| Key | Action |
+| --- | --- |
+| `Enter` / `y` | Confirm |
+| `Esc` / `n` | Cancel |
 | Left, Right | Pick the sprint in a Fail or Return confirm |
-| `Enter` / `y`, `Esc` / `n` | Confirm, cancel |
 
 ### Forms
 

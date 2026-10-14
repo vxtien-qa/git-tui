@@ -177,6 +177,15 @@ pub fn render_confirm_sprint(
     ]));
 
     let max_h = f.area().height.saturating_sub(2);
+    // On a short terminal the blank spacer rows go first, so the sprint
+    // choices and the keys stay visible; then the message is cut, not them.
+    if lines.len() as u16 + 2 > max_h {
+        lines.retain(|l| l.width() > 0);
+    }
+    let overflow = (lines.len() + 2).saturating_sub(max_h as usize);
+    // Still too tall: drop message rows from the top, keeping the Sprint
+    // label, the choices and the keys at the bottom.
+    lines.drain(..overflow.min(lines.len()));
     let height = (lines.len() as u16 + 2).min(max_h);
     let area = centered_rect(popup_w, height, f.area());
     f.render_widget(Clear, area);

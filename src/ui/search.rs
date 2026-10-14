@@ -158,8 +158,8 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
             // The focused row already says how to move and toggle, so the
             // keys it can't show come first and survive a narrow terminal.
             ("Tab", "Field"),
-            ("Ctrl+Y", "Copy list"),
-            ("Ctrl+O", "Saved"),
+            ("Ctrl+Y", "Copy"),
+            ("Ctrl+O", "Open saved"),
             ("Ctrl+S", "Save"),
             ("Space", "Toggle"),
             (theme::icon_left_right(), "Option"),
@@ -197,8 +197,9 @@ fn build_filter_lines(app: &App, max_w: usize) -> (Vec<Line<'static>>, usize) {
     let kw_focused = app.search_field_idx == 0;
     let icon = if kw_focused { theme::icon_arrow() } else { " " };
     let cursor = if kw_focused { theme::icon_cursor() } else { "" };
+    // The saved-filter keys drop out of a narrow footer first; say them here.
     let hint = if kw_focused && app.search_query.is_empty() {
-        "  type keyword + Enter"
+        "  type · Ctrl+O saved · Ctrl+S save"
     } else {
         ""
     };
