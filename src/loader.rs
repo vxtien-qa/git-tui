@@ -615,6 +615,119 @@ pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
     });
 }
 
+/// Deploy-check every ticket in `item_indices` (`d` in the pick list).
+///
+/// Tickets whose linked PRs were not read yet get them read first; each
+/// ticket then lands as its own `DeployChecked`, four tickets at a time, so
+/// the pick list fills in its UAT column as results arrive.
+pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
+    struct Row {
+        item_id: String,
+        label: String,
+        repo: String,
+        number: u32,
+        known: Option<Vec<crate::models::item::LinkedPr>>,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for &idx in item_indices {
+        let Some(item) = app.items.get(idx) else {
+            continue;
+        };
+        let (Some(number), Some(repo)) = (item.number, item.repository.clone()) else {
+            continue;
+        };
+        if item.content_type != crate::models::item::ContentType::Issue
+            || app.deploy_check_inflight.contains(&item.id)
+        {
+            continue;
+        }
+        rows.push(Row {
+            item_id: item.id.clone(),
+            label: format!("#{}", number),
+            repo,
+            number,
+            known: app
+                .linked_prs_loaded
+                .contains(&item.id)
+                .then(|| item.linked_prs.clone()),
+        });
+    }
+    if rows.is_empty() {
+        app.set_status("Nothing to check: no issue in the list, or checks already running");
+        return;
+    }
+    for r in &rows {
+        app.deploy_check_inflight.insert(r.item_id.clone());
+    }
+    let branches = app.config.deploy_branches.clone();
+    let total = rows.len();
+    app.set_status(&format!("Deploy check: {} ticket(s)...", total));
+
+    let tx = app.action_tx.clone();
+    std::thread::spawn(move || {
+        for chunk in rows.chunks(4) {
+            let workers: Vec<_> = chunk
+                .iter()
+                .map(|r| {
+                    let tx = tx.clone();
+                    let branches = branches.clone();
+                    let (item_id, label, repo, number, known) = (
+                        r.item_id.clone(),
+                        r.label.clone(),
+                        r.repo.clone(),
+                        r.number,
+                        r.known.clone(),
+                    );
+                    std::thread::spawn(move || {
+                        let prs = match known {
+                            Some(prs) => prs,
+                            None => {
+                                let result =
+                                    gh::issue::linked_prs(&repo, number).map_err(|e| e.to_string());
+                                let prs = result.clone().unwrap_or_default();
+                                let _ = tx.send(crate::app::ActionResult::LinkedPrsFetched {
+                                    item_id: item_id.clone(),
+                                    result,
+                                });
+                                prs
+                            }
+                        };
+                        let results = prs
+                            .iter()
+                            .filter(|p| p.is_merged())
+                            .filter_map(|p| p.merge_commit.as_ref().map(|sha| (p, sha)))
+                            .map(|(p, sha)| {
+                                let states = branches
+                                    .iter()
+                                    .map(|b| {
+                                        (
+                                            b.env.clone(),
+                                            gh::issue::deploy_state(&p.repo, &b.branch, sha),
+                                        )
+                                    })
+                                    .collect();
+                                (p.url.clone(), states)
+                            })
+                            .collect();
+                        let _ = tx.send(crate::app::ActionResult::DeployChecked {
+                            item_id,
+                            label,
+                            results,
+                        });
+                    })
+                })
+                .collect();
+            for w in workers {
+                let _ = w.join();
+            }
+        }
+        let _ = tx.send(crate::app::ActionResult::StatusMessage(format!(
+            "Deploy check finished for {} ticket(s)",
+            total
+        )));
+    });
+}
+
 /// Force-fetch item details using `action_rx` - never blocked by bg refresh.
 /// Used by Shift+R reload.
 pub fn force_fetch_item_detail(app: &mut App, item_idx: usize) {
@@ -878,6 +991,34 @@ mod tests {
             ..Default::default()
         }];
         app
+    }
+
+    #[test]
+    fn test_pick_list_deploy_check_skips_what_it_cannot_check() {
+        use crate::models::item::{ContentType, Item};
+        let mut app = App::new();
+        app.items = vec![
+            // A draft: no issue to read.
+            Item {
+                id: "draft".into(),
+                ..Default::default()
+            },
+            // A pull request card.
+            Item {
+                id: "pr".into(),
+                number: Some(7),
+                repository: Some("Org/web".into()),
+                content_type: ContentType::PullRequest,
+                ..Default::default()
+            },
+        ];
+        spawn_deploy_check_rows(&mut app, &[0, 1]);
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("Nothing to check"));
+        assert!(app.deploy_check_inflight.is_empty());
     }
 
     #[test]

@@ -347,6 +347,11 @@ pub enum ActionResult {
         /// `Err` when the lookup failed, which keeps what was shown.
         linked_prs: Option<Result<Vec<crate::models::item::LinkedPr>, String>>,
     },
+    /// Linked PRs read outside the detail fetch (the pick list's `d`).
+    LinkedPrsFetched {
+        item_id: String,
+        result: Result<Vec<crate::models::item::LinkedPr>, String>,
+    },
     /// A ticket's Sprint field was written on GitHub.
     SprintChanged {
         item_id: String,
@@ -1100,6 +1105,16 @@ impl App {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    /// Every selectable My Tasks row, in screen order: the status groups,
+    /// then the "Waiting for deploy" tickets. Those used to be display-only,
+    /// so moving one on (Move to In UAT, clearing a stale label) meant
+    /// finding it again on the Board or in Search.
+    pub fn my_tasks_rows(&self) -> Vec<(usize, &Item)> {
+        let mut rows = self.my_tasks_grouped();
+        rows.extend(self.waiting_for_deploy());
+        rows
     }
 
     /// Get My Tasks items grouped per status (for rendering with group headers).
@@ -2422,6 +2437,37 @@ mod tests {
         assert!(matches!(app.uat_deploy_state(&item), Some(Failed(_))));
         app.deploy_checks.insert("b".into(), env(Missing));
         assert_eq!(app.uat_deploy_state(&item), Some(Missing));
+    }
+
+    #[test]
+    fn test_waiting_for_deploy_rows_are_selectable_and_take_i() {
+        let mut app = App::new();
+        app.current_user = "qa".into();
+        app.config.current_user = "qa".into();
+        app.board_sprint_filter = Some("Sprint 31".into());
+        let mk = |id: &str, n: u32, status: Status, labels: &[&str]| Item {
+            id: id.into(),
+            number: Some(n),
+            repository: Some("acme/board".into()),
+            status,
+            sprint: Some("Sprint 31".into()),
+            assignees: vec!["qa".into()],
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            ..Default::default()
+        };
+        app.items = vec![
+            mk("a", 1, Status::InQA, &[]),                // to test
+            mk("b", 2, Status::InQA, &["Ready-for-UAT"]), // waiting for UAT deploy
+        ];
+        let rows: Vec<usize> = app.my_tasks_rows().iter().map(|(i, _)| *i).collect();
+        assert_eq!(rows, vec![0, 1]);
+
+        app.screen = Screen::MyTasks;
+        crate::handlers::board::handle_my_tasks(&mut app, crossterm::event::KeyCode::Down);
+        assert_eq!(app.list_selected, 1);
+        crate::handlers::board::handle_my_tasks(&mut app, crossterm::event::KeyCode::Char('I'));
+        assert_eq!(app.screen, Screen::BatchPicker(BatchKind::MoveToUat));
+        assert_eq!(app.batch_checked_indices(), vec![1]);
     }
 
     #[test]

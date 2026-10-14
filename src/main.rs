@@ -479,6 +479,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         item.status = status;
                     }
                 }
+                crate::app::ActionResult::LinkedPrsFetched { item_id, result } => {
+                    apply_linked_prs(app, &item_id, result);
+                }
                 crate::app::ActionResult::SprintChanged { item_id, sprint } => {
                     if let Some(item) = app.items.iter_mut().find(|i| i.id == item_id) {
                         item.sprint = Some(sprint);
@@ -592,7 +595,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         .find(|i| i.id == item_id)
                         .map(|i| app.deploy_summary(i))
                         .unwrap_or_default();
-                    if failures.is_empty() {
+                    if failures.is_empty() && summary.is_empty() {
+                        app.set_status(&format!(
+                            "Deploy check {}: no merged linked PR to check",
+                            label
+                        ));
+                    } else if failures.is_empty() {
                         app.set_status(&format!("Deploy check {}: {}", label, summary));
                     } else if confirm_open {
                         app.set_status(&format!(
@@ -628,16 +636,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         if created_at.is_some() {
                             item.created_at = created_at;
                         }
-                        match linked_prs {
-                            Some(Ok(prs)) => {
-                                item.linked_prs = prs;
-                                app.linked_prs_loaded.insert(item_id.clone());
-                                app.linked_prs_failed.remove(&item_id);
-                            }
-                            Some(Err(e)) => {
-                                app.linked_prs_failed.insert(item_id.clone(), e);
-                            }
-                            None => {}
+                        if let Some(result) = linked_prs {
+                            apply_linked_prs(app, &item_id, result);
                         }
                         app.set_status(&format!(
                             "Loaded: {} comment{}",
@@ -700,6 +700,27 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     }
 
     Ok(())
+}
+
+/// Store a ticket's linked-PR lookup: the list on success, the error on
+/// failure (keeping whatever was shown before).
+fn apply_linked_prs(
+    app: &mut App,
+    item_id: &str,
+    result: Result<Vec<crate::models::item::LinkedPr>, String>,
+) {
+    match result {
+        Ok(prs) => {
+            if let Some(item) = app.items.iter_mut().find(|i| i.id == item_id) {
+                item.linked_prs = prs;
+            }
+            app.linked_prs_loaded.insert(item_id.to_string());
+            app.linked_prs_failed.remove(item_id);
+        }
+        Err(e) => {
+            app.linked_prs_failed.insert(item_id.to_string(), e);
+        }
+    }
 }
 
 /// Handle a single terminal event. Quit requests set `app.running = false`.

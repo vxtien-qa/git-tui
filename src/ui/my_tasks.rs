@@ -171,15 +171,22 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             ),
         ]));
         for (_, item) in &waiting {
+            let is_selected = global_idx == app.list_selected;
+            global_idx += 1;
             let num = item.number.map(|n| format!("#{}", n)).unwrap_or_default();
             let target = if item.status == Status::InQADev {
                 "STG deploy pending"
             } else {
-                "UAT deploy pending"
+                "UAT deploy pending - I when it is on UAT"
+            };
+            let (pointer, style) = if is_selected {
+                (theme::icon_arrow(), theme::selected())
+            } else {
+                (" ", theme::dim())
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("   {:<6} ", num), theme::dim()),
-                Span::styled(trunc(&item.title, title_w), theme::dim()),
+                Span::styled(format!(" {} {:<6} ", pointer, num), style),
+                Span::styled(trunc(&item.title, title_w), style),
                 Span::styled(
                     format!("  {} {}", theme::icon_right_arrow(), target),
                     theme::dim(),
@@ -195,7 +202,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(theme::border())
         .title(Span::styled(
-            super::utils::position_title(app.list_selected, displayed_total),
+            super::utils::position_title(app.list_selected, app.my_tasks_rows().len()),
             theme::dim(),
         ));
     f.render_widget(Paragraph::new(visible).block(block), chunks[1]);
@@ -206,6 +213,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             (theme::icon_up_down(), "Nav"),
             ("Enter", "Detail"),
             ("p", "QA Actions"),
+            ("I", "To In UAT"),
             ("f", "Fail"),
             ("m", "Move"),
             ("s", "Sprint"),

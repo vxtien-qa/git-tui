@@ -27,6 +27,15 @@ pub fn handle_batch_picker(app: &mut App, key: KeyCode, kind: BatchKind) {
             }
         }
         KeyCode::Enter => confirm_batch(app, kind),
+        // Deploy-check every row at once, instead of opening each ticket.
+        KeyCode::Char('d') => {
+            let rows: Vec<usize> = app
+                .batch_rows
+                .iter()
+                .filter_map(|(id, _)| app.items.iter().position(|i| &i.id == id))
+                .collect();
+            crate::loader::spawn_deploy_check_rows(app, &rows);
+        }
         KeyCode::Char('?') => app.goto(crate::app::Screen::Help),
         KeyCode::Esc => app.go_back(),
         _ => {}

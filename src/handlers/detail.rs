@@ -165,7 +165,7 @@ pub fn start_fail_flow(app: &mut App, item_idx: usize) {
 }
 
 /// Shared helper: show confirmation popup for QA actions (PassDev, PassStg, PassUat, Return).
-fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
+pub fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
     match key {
         // On ItemDetail, `p` opens the QA Actions menu instead (see handle_detail);
         // here it fires from the QA Actions popup.

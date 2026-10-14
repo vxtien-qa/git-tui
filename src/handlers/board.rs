@@ -128,12 +128,13 @@ pub fn handle_board(app: &mut App, key: KeyCode) {
 
 pub fn handle_my_tasks(app: &mut App, key: KeyCode) {
     // Clamp list_selected if items were removed (e.g., after QA action changed status)
-    let task_count = app.my_tasks_grouped().len();
+    let task_count = app.my_tasks_rows().len();
     if task_count > 0 && app.list_selected >= task_count {
         app.list_selected = task_count - 1;
     }
 
-    let grouped_items = app.my_tasks_grouped();
+    let selected: Option<usize> = app.my_tasks_rows().get(app.list_selected).map(|(i, _)| *i);
+    let row_count = task_count;
     match key {
         KeyCode::Up => {
             if app.list_selected > 0 {
@@ -145,7 +146,7 @@ pub fn handle_my_tasks(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Down => {
-            if app.list_selected + 1 < grouped_items.len() {
+            if app.list_selected + 1 < row_count {
                 app.list_selected += 1;
                 let line_pos = compute_my_task_line(app, app.list_selected);
                 // Height-aware: use the viewport measured by the last render
@@ -157,24 +158,31 @@ pub fn handle_my_tasks(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Enter => {
-            if let Some(&(item_idx, _)) = grouped_items.get(app.list_selected) {
+            if let Some(item_idx) = selected {
                 app.detail_scroll = 0;
                 app.goto(Screen::ItemDetail(item_idx));
                 loader::fetch_item_detail(app, item_idx);
             }
         }
         KeyCode::Char('p') => {
-            if let Some(&(item_idx, _)) = grouped_items.get(app.list_selected) {
+            if let Some(item_idx) = selected {
                 app.goto(Screen::QaActions(item_idx));
             }
         }
+        // The QA actions that fit a waiting ticket, straight from the list:
+        // its code reached UAT, or its handoff label went stale.
+        KeyCode::Char('I') | KeyCode::Char('x') => {
+            if let Some(item_idx) = selected {
+                crate::handlers::detail::confirm_qa_action(app, key, item_idx);
+            }
+        }
         KeyCode::Char('f') => {
-            if let Some(&(item_idx, _)) = grouped_items.get(app.list_selected) {
+            if let Some(item_idx) = selected {
                 crate::handlers::detail::start_fail_flow(app, item_idx);
             }
         }
         KeyCode::Char('m') => {
-            if let Some(&(item_idx, _)) = grouped_items.get(app.list_selected) {
+            if let Some(item_idx) = selected {
                 app.goto(Screen::MoveDialog(vec![item_idx]));
             }
         }
@@ -241,6 +249,21 @@ fn compute_my_task_line_inner(app: &App, target_idx: usize) -> (usize, Option<us
         }
 
         line += 1; // spacer
+    }
+
+    // "Waiting for deploy": a header, then one line per ticket.
+    let waiting = app.waiting_for_deploy().len();
+    if waiting > 0 {
+        let header_line = line;
+        line += 1;
+        for i in 0..waiting {
+            if global_idx == target_idx {
+                let hdr = if i == 0 { Some(header_line) } else { None };
+                return (line, hdr);
+            }
+            line += 1;
+            global_idx += 1;
+        }
     }
 
     (line, None)

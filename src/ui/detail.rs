@@ -7,6 +7,7 @@ use super::theme;
 use super::utils::{trunc, word_wrap};
 use crate::app::App;
 use crate::models::item::MediaType;
+use crate::models::status::Status;
 
 /// Render the full item detail screen.
 pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
@@ -271,23 +272,34 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
     // Compact labels, most-used first: the full, self-explaining action list
     // lives one keypress away in the [p] menu, so this row does not need to
     // carry all sixteen bindings.
-    let footer = super::utils::footer_line(
-        &[
-            ("p", "QA menu"),
-            ("d", "Deploy check"),
-            ("c", "Comment"),
-            ("e", "Enhancement"),
-            ("m", "Move"),
-            ("h", "History"),
-            ("y", "CopyMD"),
-            ("w", "Web"),
-            ("o", "Parent"),
-            ("r", "Reload"),
-            ("?", "Help"),
-            ("Esc", "Back"),
-        ],
-        area.width as usize,
-    );
+    // The QA action that fits the ticket's column comes right after the
+    // menu, so the key for the next step is on screen without opening it.
+    let status = app.items.get(item_idx).map(|i| i.status.clone());
+    let has_uat_label = app.item_has_label(item_idx, "Ready-for-UAT");
+    let mut hints: Vec<(&str, &str)> = vec![("p", "QA menu")];
+    match status {
+        Some(Status::InUAT) => {
+            hints.push(("U", "Pass UAT"));
+            hints.push(("V", "Bulk verify"));
+        }
+        Some(Status::InQA) if has_uat_label => hints.push(("I", "To In UAT")),
+        Some(Status::InQA) => hints.push(("P", "Pass STG")),
+        _ => {}
+    }
+    hints.extend_from_slice(&[
+        ("d", "Deploy check"),
+        ("c", "Comment"),
+        ("e", "Enhancement"),
+        ("m", "Move"),
+        ("h", "History"),
+        ("y", "CopyMD"),
+        ("w", "Web"),
+        ("o", "Parent"),
+        ("r", "Reload"),
+        ("?", "Help"),
+        ("Esc", "Back"),
+    ]);
+    let footer = super::utils::footer_line(&hints, area.width as usize);
     f.render_widget(Paragraph::new(footer), chunks[1]);
 }
 

@@ -21,7 +21,7 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
             "Checked tickets move to Tech Complete, each gets a comment, and one Slack summary goes out."
         }
         BatchKind::MoveToUat => {
-            "Check the tickets whose code is on UAT: each moves to In UAT, loses Ready-for-UAT and gets a comment; one Slack message lists them. UAT = the d deploy check, if run."
+            "Check the tickets whose code is on UAT: each moves to In UAT, loses Ready-for-UAT and gets a comment; one Slack message lists them. d checks every row's PRs against the UAT branch."
         }
     };
 
@@ -68,15 +68,16 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
             num,
             trunc(sprint, 10)
         );
-        // Move to In UAT: what the deploy check said about UAT, if it ran.
-        let uat = if kind == BatchKind::MoveToUat {
+        // What the deploy check (d) said about UAT, once it ran.
+        let uat = {
             let mark = match item.and_then(|i| app.uat_deploy_state(i)) {
                 Some(state) => super::utils::deploy_mark(&state).0,
+                None if item.is_some_and(|i| app.deploy_check_inflight.contains(&i.id)) => {
+                    theme::icon_spinner().to_string()
+                }
                 None => " ".to_string(),
             };
             format!("UAT {:<2} ", mark)
-        } else {
-            String::new()
         };
         let fixed = format!("{}{}", fixed, uat);
         let title_w = inner_w.saturating_sub(fixed.chars().count()).max(8);
@@ -112,6 +113,7 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
             ("Space", "Check"),
             ("a", "All/none"),
             ("Enter", "Confirm"),
+            ("d", "Deploy check all"),
             (theme::icon_up_down(), "Move"),
             ("Esc", "Back"),
         ],
