@@ -95,10 +95,12 @@ pub fn view(repo: &str, issue_number: u32) -> Result<String> {
 /// Pull requests linked to an issue, from both places GitHub records them.
 ///
 /// `closedByPullRequestsReferences` holds the PRs that close the issue
-/// ("Fixes #n"); the timeline's cross-references and connections hold the PRs
-/// that only mention it or were linked by hand - which is where bundle PRs
-/// ("All outstanding FE work for s29 (#3920, ...)") and deploy-branch PRs
-/// show up.
+/// ("Fixes #n") and the ones linked by hand in the Development panel; the
+/// timeline's cross-references hold the PRs that only mention it - which is
+/// where bundle PRs ("All outstanding FE work for s29 (#3920, ...)") and
+/// deploy-branch PRs show up. Connection events are left out on purpose: a
+/// hand-linked PR is already in the first list, and an event for one that was
+/// later unlinked would bring it back.
 pub fn linked_prs(repo: &str, number: u32) -> Result<Vec<LinkedPr>> {
     let (owner, name) = repo
         .split_once('/')
@@ -125,10 +127,9 @@ query($owner: String!, $name: String!, $number: Int!) {
       closedByPullRequestsReferences(first: 25, includeClosedPrs: true) {
         nodes { ...pr }
       }
-      timelineItems(last: 100, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+      timelineItems(last: 100, itemTypes: [CROSS_REFERENCED_EVENT]) {
         nodes {
           ... on CrossReferencedEvent { source { ... on PullRequest { ...pr } } }
-          ... on ConnectedEvent { subject { ... on PullRequest { ...pr } } }
         }
       }
     }
@@ -211,8 +212,8 @@ pub enum DeployState {
     /// may have arrived another way, such as a cherry-pick onto a deploy
     /// branch. Never reported as "not deployed".
     Unknown,
-    /// The repository has no such branch (404).
-    NoBranch,
+    /// GitHub answered 404: no such branch, commit or repository.
+    NotFound,
     /// The check itself failed.
     Failed(String),
 }
@@ -229,7 +230,7 @@ impl DeployState {
 
     fn from_error(message: &str) -> Self {
         if message.contains("HTTP 404") || message.contains("Not Found") {
-            DeployState::NoBranch
+            DeployState::NotFound
         } else {
             DeployState::Failed(message.lines().last().unwrap_or(message).to_string())
         }
@@ -405,7 +406,7 @@ mod tests {
             DeployState::from_error(
                 "gh api repos/x/compare/nope...abc failed: gh: Not Found (HTTP 404)"
             ),
-            DeployState::NoBranch
+            DeployState::NotFound
         );
         assert!(matches!(
             DeployState::from_error("gh: API rate limit exceeded (HTTP 403)"),

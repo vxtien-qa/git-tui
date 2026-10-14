@@ -581,26 +581,32 @@ pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
 
     let tx = app.action_tx.clone();
     std::thread::spawn(move || {
-        let workers: Vec<_> = prs
-            .into_iter()
-            .map(|pr| {
-                let branches = branches.clone();
-                std::thread::spawn(move || {
-                    let sha = pr.merge_commit.clone().unwrap_or_default();
-                    let states = branches
-                        .iter()
-                        .map(|b| {
-                            (
-                                b.env.clone(),
-                                gh::issue::deploy_state(&pr.repo, &b.branch, &sha),
-                            )
-                        })
-                        .collect();
-                    (pr.url, states)
+        // A root ticket can be mentioned by dozens of PRs: check at most four
+        // at a time rather than start a `gh` process per PR at once.
+        let mut results = Vec::new();
+        for chunk in prs.chunks(4) {
+            let workers: Vec<_> = chunk
+                .iter()
+                .cloned()
+                .map(|pr| {
+                    let branches = branches.clone();
+                    std::thread::spawn(move || {
+                        let sha = pr.merge_commit.clone().unwrap_or_default();
+                        let states = branches
+                            .iter()
+                            .map(|b| {
+                                (
+                                    b.env.clone(),
+                                    gh::issue::deploy_state(&pr.repo, &b.branch, &sha),
+                                )
+                            })
+                            .collect();
+                        (pr.url, states)
+                    })
                 })
-            })
-            .collect();
-        let results = workers.into_iter().filter_map(|w| w.join().ok()).collect();
+                .collect();
+            results.extend(workers.into_iter().filter_map(|w| w.join().ok()));
+        }
         let _ = tx.send(crate::app::ActionResult::DeployChecked {
             item_id,
             label,

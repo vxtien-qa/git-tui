@@ -71,10 +71,8 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
         // Move to In UAT: what the deploy check said about UAT, if it ran.
         let uat = if kind == BatchKind::MoveToUat {
             let mark = match item.and_then(|i| app.uat_deploy_state(i)) {
-                Some(crate::gh::issue::DeployState::Contained) => theme::icon_ok().to_string(),
-                Some(crate::gh::issue::DeployState::Missing) => theme::icon_fail().to_string(),
-                Some(_) => "?".to_string(),
-                None => "-".to_string(),
+                Some(state) => super::utils::deploy_mark(&state).0,
+                None => " ".to_string(),
             };
             format!("UAT {:<2} ", mark)
         } else {

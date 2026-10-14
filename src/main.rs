@@ -257,6 +257,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             fields,
                             project_id,
                         } => {
+                            // The option under each filter row's cursor, by
+                            // value: the EPIC row is ordered by open work, so
+                            // a sync can reorder it under the cursor.
+                            let cursor_values: Vec<Option<String>> = (1..=App::SEARCH_FILTER_ROWS)
+                                .map(|field| {
+                                    handlers::search::get_filter_option_at(
+                                        app,
+                                        field,
+                                        app.filter_cursor.get(field - 1).copied().unwrap_or(0),
+                                    )
+                                })
+                                .collect();
                             let old_items = std::mem::replace(&mut app.items, items);
                             // Carry batch selection across the refresh -
                             // `selected` is #[serde(skip)], so without this a
@@ -277,13 +289,34 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             // Linked PRs load with a ticket's detail, not with
                             // the sync - carry them over or every auto-sync
                             // would blank the PR list of the ticket on screen.
-                            for item in &mut app.items {
-                                if item.linked_prs.is_empty() {
-                                    if let Some(old) = old_items
-                                        .iter()
-                                        .find(|o| o.id == item.id && !o.linked_prs.is_empty())
-                                    {
-                                        item.linked_prs = old.linked_prs.clone();
+                            let old_prs: std::collections::HashMap<
+                                &str,
+                                &Vec<crate::models::item::LinkedPr>,
+                            > = old_items
+                                .iter()
+                                .filter(|o| !o.linked_prs.is_empty())
+                                .map(|o| (o.id.as_str(), &o.linked_prs))
+                                .collect();
+                            if !old_prs.is_empty() {
+                                for item in &mut app.items {
+                                    if item.linked_prs.is_empty() {
+                                        if let Some(prs) = old_prs.get(item.id.as_str()) {
+                                            item.linked_prs = (*prs).clone();
+                                        }
+                                    }
+                                }
+                            }
+                            for (i, value) in cursor_values.into_iter().enumerate() {
+                                let Some(value) = value else {
+                                    continue;
+                                };
+                                if let Some(pos) = app
+                                    .search_filter_options(i + 1)
+                                    .iter()
+                                    .position(|(v, _)| *v == value)
+                                {
+                                    if let Some(c) = app.filter_cursor.get_mut(i) {
+                                        *c = pos;
                                     }
                                 }
                             }
@@ -385,7 +418,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         while let Ok(result) = app.action_rx.try_recv() {
             // StatusMessage is a side-note (e.g. a delayed Slack-notify result)
             // and must not clear the spinner of an action still in flight.
-            if !matches!(result, crate::app::ActionResult::StatusMessage(_)) {
+            // Neither do the per-ticket updates a batch sends while it runs.
+            if !matches!(
+                result,
+                crate::app::ActionResult::StatusMessage(_)
+                    | crate::app::ActionResult::ParentStatusChanged { .. }
+                    | crate::app::ActionResult::RemoveLabelLocal { .. }
+                    | crate::app::ActionResult::SprintChanged { .. }
+            ) {
                 app.loading = false;
             }
             // Result popups must not clobber an open Confirm popup (that would

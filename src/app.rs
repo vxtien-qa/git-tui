@@ -869,9 +869,13 @@ impl App {
         choices
     }
 
-    /// The UAT verdict of a ticket's deploy check, if one ran this session:
-    /// ✗ when any checked PR is missing from the UAT branch, ? when any is
-    /// unknown, ✓ when all are in.
+    /// The UAT verdict of a ticket's deploy check, if one ran this session.
+    ///
+    /// ✓ only when every linked PR that still counts (open or merged; a PR
+    /// closed without merging does not) is merged and its check says the UAT
+    /// branch has it. An open PR, or a merged one not checked yet, makes it
+    /// ? - part of the change may not be on UAT. Otherwise the worst result
+    /// wins: ✗, then a failed check, then ? and not-found.
     pub fn uat_deploy_state(
         &self,
         item: &crate::models::item::Item,
@@ -880,21 +884,60 @@ impl App {
         let env_idx = self.config.deploy_branches.iter().position(|b| {
             b.env.eq_ignore_ascii_case("UAT") || b.branch.eq_ignore_ascii_case("uat")
         })?;
-        let states: Vec<&DeployState> = item
+        let counted: Vec<&crate::models::item::LinkedPr> = item
             .linked_prs
             .iter()
-            .filter_map(|pr| self.deploy_checks.get(&pr.url))
-            .filter_map(|r| r.get(env_idx).map(|(_, s)| s))
+            .filter(|pr| pr.is_merged() || pr.state.eq_ignore_ascii_case("OPEN"))
             .collect();
-        if states.is_empty() {
-            None
-        } else if states.contains(&&DeployState::Missing) {
-            Some(DeployState::Missing)
-        } else if states.iter().all(|s| **s == DeployState::Contained) {
-            Some(DeployState::Contained)
-        } else {
-            Some(DeployState::Unknown)
+        let states: Vec<Option<&DeployState>> = counted
+            .iter()
+            .map(|pr| {
+                self.deploy_checks
+                    .get(&pr.url)
+                    .and_then(|r| r.get(env_idx).map(|(_, s)| s))
+            })
+            .collect();
+        if states.iter().all(|s| s.is_none()) {
+            return None; // never checked
         }
+        let is = |want: &DeployState| states.contains(&Some(want));
+        Some(if is(&DeployState::Missing) {
+            DeployState::Missing
+        } else if let Some(Some(failed @ DeployState::Failed(_))) = states
+            .iter()
+            .find(|s| matches!(s, Some(DeployState::Failed(_))))
+        {
+            (*failed).clone()
+        } else if states.iter().all(|s| *s == Some(&DeployState::Contained)) {
+            DeployState::Contained
+        } else {
+            DeployState::Unknown
+        })
+    }
+
+    /// Candidates for Bulk verify UAT: every ticket In UAT in the active
+    /// sprint, plus the ticket it was opened from, by number.
+    ///
+    /// A UAT run verifies everything deployed there at once, so passing it one
+    /// ticket at a time meant a keypress and a Slack ping per ticket for a
+    /// single regression result. The triggering ticket is always included,
+    /// even when the sprint filter would otherwise hide it.
+    pub fn verify_uat_candidates(&self, item_idx: usize) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .items_in_column(&Status::InUAT)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        if !indices.contains(&item_idx) {
+            indices.push(item_idx);
+        }
+        indices.sort_by_key(|i| {
+            self.items
+                .get(*i)
+                .and_then(|it| it.number)
+                .unwrap_or(u32::MAX)
+        });
+        indices
     }
 
     /// Tickets Move to In UAT offers: In QA with the Ready-for-UAT label, in
@@ -1558,6 +1601,28 @@ impl App {
     /// what the row shows. They differ only for the EPIC row, whose values
     /// carry the repository because issue numbers repeat across repositories.
     pub fn search_filter_options(&self, field_idx: usize) -> Vec<(String, String)> {
+        let mut options = self.search_filter_options_on_board(field_idx);
+        // A selected value the board no longer offers (an epic whose last
+        // open ticket closed, a label nobody carries any more, a saved filter
+        // from another sprint) stays listed, so it can still be seen and
+        // switched off on its own.
+        if (1..=Self::SEARCH_FILTER_ROWS).contains(&field_idx) {
+            for value in self.search_filter(field_idx) {
+                let bare = value.strip_prefix('!').unwrap_or(value);
+                if !options.iter().any(|(v, _)| v == bare) {
+                    let label = match bare.rsplit_once('#') {
+                        Some((_, n)) if field_idx == 6 => format!("#{} (no open work)", n),
+                        _ => bare.to_string(),
+                    };
+                    options.push((bare.to_string(), label));
+                }
+            }
+        }
+        options
+    }
+
+    /// `search_filter_options` from the board alone.
+    fn search_filter_options_on_board(&self, field_idx: usize) -> Vec<(String, String)> {
         let same = |v: Vec<String>| v.into_iter().map(|o| (o.clone(), o)).collect();
         match field_idx {
             1 => same(
@@ -2314,21 +2379,16 @@ mod tests {
     }
 
     #[test]
-    fn test_uat_deploy_state_takes_the_worst_checked_pr() {
+    fn test_uat_deploy_state_needs_every_pr_merged_and_checked() {
         use crate::gh::issue::DeployState::*;
         use crate::models::item::LinkedPr;
         let mut app = App::new();
         app.config.deploy_branches = crate::config::Config::default().deploy_branches;
-        let pr = |u: &str| LinkedPr {
+        let pr = |u: &str, state: &str| LinkedPr {
             url: u.into(),
-            state: "MERGED".into(),
+            state: state.into(),
             ..Default::default()
         };
-        let item = Item {
-            linked_prs: vec![pr("a"), pr("b")],
-            ..Default::default()
-        };
-        assert_eq!(app.uat_deploy_state(&item), None);
         let env = |uat: crate::gh::issue::DeployState| {
             vec![
                 ("Dev".to_string(), Contained),
@@ -2337,12 +2397,66 @@ mod tests {
                 ("Prod".to_string(), Missing),
             ]
         };
+        let mut item = Item {
+            linked_prs: vec![pr("a", "MERGED"), pr("b", "MERGED")],
+            ..Default::default()
+        };
+        assert_eq!(app.uat_deploy_state(&item), None, "never checked");
+
         app.deploy_checks.insert("a".into(), env(Contained));
-        assert_eq!(app.uat_deploy_state(&item), Some(Contained));
-        app.deploy_checks.insert("b".into(), env(Unknown));
+        // b is merged but not checked: part of the change may be missing.
         assert_eq!(app.uat_deploy_state(&item), Some(Unknown));
+        app.deploy_checks.insert("b".into(), env(Contained));
+        assert_eq!(app.uat_deploy_state(&item), Some(Contained));
+
+        // An open PR means the change is not all merged yet.
+        item.linked_prs.push(pr("c", "OPEN"));
+        assert_eq!(app.uat_deploy_state(&item), Some(Unknown));
+        // A PR closed without merging does not count.
+        item.linked_prs.pop();
+        item.linked_prs.push(pr("d", "CLOSED"));
+        assert_eq!(app.uat_deploy_state(&item), Some(Contained));
+
+        app.deploy_checks
+            .insert("b".into(), env(Failed("rate limit".into())));
+        assert!(matches!(app.uat_deploy_state(&item), Some(Failed(_))));
         app.deploy_checks.insert("b".into(), env(Missing));
         assert_eq!(app.uat_deploy_state(&item), Some(Missing));
+    }
+
+    #[test]
+    fn test_menu_search_keeps_a_loaded_saved_filter_as_it_is() {
+        let mut app = App::new();
+        // Fresh Search: the usual open-work default.
+        crate::handlers::screens::activate_menu_item(&mut app, 2);
+        assert_eq!(app.filter_status.len(), 3);
+
+        // A saved filter with no Status on purpose is not topped up.
+        let mut app = App::new();
+        app.filter_label = vec!["Ready-for-UAT".into()];
+        crate::handlers::screens::activate_menu_item(&mut app, 2);
+        assert!(app.filter_status.is_empty());
+    }
+
+    #[test]
+    fn test_selected_filter_values_stay_listed_after_they_leave_the_board() {
+        let mut app = App::new();
+        app.items = vec![Item {
+            id: "1".into(),
+            number: Some(1),
+            repository: Some("acme/board".into()),
+            assignees: vec!["dev-a".into()],
+            ..Default::default()
+        }];
+        app.filter_epic = vec!["!acme/board#3111".into()];
+        app.filter_assignee = vec!["gone-user".into()];
+        let epic = app.search_filter_options(6);
+        assert!(epic
+            .iter()
+            .any(|(v, l)| v == "acme/board#3111" && l == "#3111 (no open work)"));
+        let who = app.search_filter_options(7);
+        assert!(who.iter().any(|(v, _)| v == "gone-user"));
+        assert!(who.iter().any(|(v, _)| v == "dev-a"));
     }
 
     #[test]

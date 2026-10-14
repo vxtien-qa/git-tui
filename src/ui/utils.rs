@@ -158,6 +158,18 @@ pub fn sanitize_glyphs(s: &str) -> String {
         .replace('…', "...")
 }
 
+/// Mark and style for one deploy check result, the same everywhere it shows.
+pub fn deploy_mark(state: &crate::gh::issue::DeployState) -> (String, ratatui::style::Style) {
+    use crate::gh::issue::DeployState;
+    match state {
+        DeployState::Contained => (theme::icon_ok().to_string(), theme::success()),
+        DeployState::Missing => (theme::icon_fail().to_string(), theme::error()),
+        DeployState::Unknown => ("?".to_string(), theme::warning()),
+        DeployState::NotFound => ("-".to_string(), theme::dim()),
+        DeployState::Failed(_) => ("!".to_string(), theme::error()),
+    }
+}
+
 /// Build a footer hint line that always fits `width`.
 ///
 /// Hints are laid out from the left while they fit, and the LAST hint is

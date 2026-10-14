@@ -151,31 +151,6 @@ pub fn confirm_with_sprint(
     };
 }
 
-/// Candidates for Bulk verify UAT: every ticket In UAT in the active sprint.
-///
-/// A UAT run verifies everything deployed there at once, so passing it one
-/// ticket at a time meant a keypress and a Slack ping per ticket for a single
-/// regression result. The triggering ticket is always included, even when the
-/// sprint filter would otherwise hide it.
-fn uat_batch(app: &App, item_idx: usize) -> Vec<usize> {
-    let mut indices: Vec<usize> = app
-        .items_in_column(&Status::InUAT)
-        .into_iter()
-        .map(|(i, _)| i)
-        .collect();
-    if !indices.contains(&item_idx) {
-        indices.push(item_idx);
-    }
-    // Stable, readable order for the confirm list and the Slack summary.
-    indices.sort_by_key(|i| {
-        app.items
-            .get(*i)
-            .and_then(|it| it.number)
-            .unwrap_or(u32::MAX)
-    });
-    indices
-}
-
 /// Open the Fail (new bug) form for an item, guarded by column.
 ///
 /// Public because the Board and My Tasks screens have their own `f` binding;
@@ -245,7 +220,7 @@ fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
         KeyCode::Char('V') => {
             match qa_pass_allowed(app, item_idx, PassKind::Uat) {
                 Ok(()) => {
-                    let rows = uat_batch(app, item_idx);
+                    let rows = app.verify_uat_candidates(item_idx);
                     // A regression run clears everything deployed: all checked,
                     // the QA unchecks what the run did not cover.
                     app.open_batch_picker(BatchKind::VerifyUat, &rows, |_| true);
@@ -786,7 +761,7 @@ mod tests {
         app.board_sprint_filter = Some("Sprint 28".to_string());
 
         // Triggered from a ticket inside the filter: the whole column, ordered.
-        let batch = uat_batch(&app, 0);
+        let batch = app.verify_uat_candidates(0);
         assert_eq!(
             batch,
             vec![0, 2],
@@ -796,7 +771,7 @@ mod tests {
         // Triggered from a ticket the sprint filter hides: it still has to be
         // included, otherwise the action would silently skip the ticket the
         // user actually picked.
-        let batch = uat_batch(&app, 3);
+        let batch = app.verify_uat_candidates(3);
         assert_eq!(batch, vec![0, 2, 3]);
     }
 
@@ -808,7 +783,7 @@ mod tests {
             uat_item("b", 401, "Sprint 28", Status::InUAT),
         ];
         app.board_sprint_filter = Some("Sprint 28".to_string());
-        assert_eq!(uat_batch(&app, 0), vec![1, 0]);
+        assert_eq!(app.verify_uat_candidates(0), vec![1, 0]);
     }
 
     #[test]

@@ -78,12 +78,22 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
 
             let mut targets: Vec<UatTarget> = Vec::new();
             let mut drafts = 0usize;
+            let mut moved_away: Vec<String> = Vec::new();
             let mut slack_items: Vec<slack::notifier::ReleaseItem> = Vec::new();
             let mut slack_devs: Vec<String> = Vec::new();
             for &idx in indices {
                 let Some(item) = app.items.get(idx) else {
                     continue;
                 };
+                // Second guard, at execute time (see Pass UAT).
+                if item.status != Status::InQA {
+                    moved_away.push(format!(
+                        "#{} is now '{}'",
+                        item.number.unwrap_or(0),
+                        item.status.label()
+                    ));
+                    continue;
+                }
                 let (Some(number), Some(repo)) = (item.number, item.repository.clone()) else {
                     drafts += 1;
                     continue;
@@ -106,19 +116,22 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                 });
             }
             if targets.is_empty() {
-                app.popup = Popup::Error(
+                app.popup = Popup::Error(if moved_away.is_empty() {
                     "Move to In UAT: none of these items has a linked GitHub issue (draft items)."
-                        .to_string(),
-                );
+                        .to_string()
+                } else {
+                    format!(
+                        "Move to In UAT: nothing to move - no longer In QA:\n{}",
+                        moved_away.join("\n")
+                    )
+                });
                 return;
             }
 
             // Optimistic local move; a revalidation abort puts it back.
-            for &idx in indices {
-                if let Some(item) = app.items.get_mut(idx) {
-                    if item.number.is_some() {
-                        item.status = Status::InUAT;
-                    }
+            for t in &targets {
+                if let Some(item) = app.items.iter_mut().find(|i| i.id == t.item_id) {
+                    item.status = Status::InUAT;
                 }
             }
 
@@ -140,6 +153,9 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                         "{} draft item(s) skipped (no linked issue)",
                         drafts
                     ));
+                }
+                for m in &moved_away {
+                    notes.push(format!("skipped: {}", m));
                 }
                 for (i, t) in targets.iter().enumerate() {
                     // A dev may have moved it since the list was opened.
@@ -260,6 +276,7 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
 
             let mut targets: Vec<UatTarget> = Vec::new();
             let mut drafts: Vec<String> = Vec::new();
+            let mut moved_away: Vec<String> = Vec::new();
             let mut slack_items: Vec<slack::notifier::ReleaseItem> = Vec::new();
             let mut slack_devs: Vec<String> = Vec::new();
 
@@ -267,6 +284,16 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                 let Some(item) = app.items.get(idx) else {
                     continue;
                 };
+                // Second guard, at execute time: a sync may have shown the
+                // ticket leaving In UAT while the pick list was open.
+                if item.status != Status::InUAT {
+                    moved_away.push(format!(
+                        "#{} is now '{}'",
+                        item.number.unwrap_or(0),
+                        item.status.label()
+                    ));
+                    continue;
+                }
                 // A draft item has no issue to move or comment on.
                 let (Some(number), Some(repo)) = (item.number, item.repository.clone()) else {
                     drafts.push(item.title.clone());
@@ -306,20 +333,23 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
             }
 
             if targets.is_empty() {
-                app.popup = Popup::Error(
+                app.popup = Popup::Error(if moved_away.is_empty() {
                     "Pass UAT: none of these items has a linked GitHub issue (draft items) - cannot move or comment."
-                        .to_string(),
-                );
+                        .to_string()
+                } else {
+                    format!(
+                        "Pass UAT: nothing to pass - no longer In UAT:\n{}",
+                        moved_away.join("\n")
+                    )
+                });
                 return;
             }
 
             // Optimistic local move; anything the revalidation aborts is put
             // back through ParentStatusChanged.
-            for &idx in indices {
-                if let Some(item) = app.items.get_mut(idx) {
-                    if item.number.is_some() {
-                        item.status = Status::TechComplete;
-                    }
+            for t in &targets {
+                if let Some(item) = app.items.iter_mut().find(|i| i.id == t.item_id) {
+                    item.status = Status::TechComplete;
                 }
             }
 
@@ -412,6 +442,9 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                         "{} draft item(s) skipped (no linked issue)",
                         drafts.len()
                     ));
+                }
+                for m in &moved_away {
+                    notes.push(format!("skipped: {}", m));
                 }
                 for a in &aborted {
                     notes.push(format!("aborted: {}", a));

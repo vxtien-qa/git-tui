@@ -8,18 +8,6 @@ use super::utils::{trunc, word_wrap};
 use crate::app::App;
 use crate::models::item::MediaType;
 
-/// Mark and style for one deploy check cell.
-fn deploy_mark(state: &crate::gh::issue::DeployState) -> (String, ratatui::style::Style) {
-    use crate::gh::issue::DeployState;
-    match state {
-        DeployState::Contained => (theme::icon_ok().to_string(), theme::success()),
-        DeployState::Missing => (theme::icon_fail().to_string(), theme::error()),
-        DeployState::Unknown => ("?".to_string(), theme::warning()),
-        DeployState::NoBranch => ("-".to_string(), theme::dim()),
-        DeployState::Failed(_) => ("!".to_string(), theme::error()),
-    }
-}
-
 /// Render the full item detail screen.
 pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
     let item = match app.items.get(item_idx) {
@@ -143,7 +131,7 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
             if let Some(states) = app.deploy_checks.get(&pr.url) {
                 let mut spans = vec![Span::raw("    ")];
                 for (env, state) in states {
-                    let (mark, style) = deploy_mark(state);
+                    let (mark, style) = super::utils::deploy_mark(state);
                     spans.push(Span::styled(format!("{} ", env), theme::dim()));
                     spans.push(Span::styled(mark, style));
                     spans.push(Span::raw("  "));
@@ -162,7 +150,7 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
             .any(|pr| app.deploy_checks.contains_key(&pr.url))
         {
             let legend = format!(
-                "{} in branch · {} not in branch · ? not in its history (maybe cherry-picked) · - no such branch",
+                "{} in branch · {} not in branch · ? not in its history (maybe cherry-picked) · - not found (branch, commit or repo) · ! check failed",
                 theme::icon_ok(),
                 theme::icon_fail()
             );

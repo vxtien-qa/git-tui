@@ -2207,12 +2207,15 @@ fn list_label(item: &Item) -> String {
     }
 }
 
-/// Markdown link text: a title like `[FE] Copy changes` would otherwise close
-/// the link early.
+/// Markdown text: a title like `[FE] Copy changes` would otherwise close the
+/// link early, and GitHub drops `<Activity>` as an unknown HTML tag (checked
+/// through its markdown API, 2026-10-14). Backslash escapes keep both.
 fn escape_md_link_text(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('[', "\\[")
         .replace(']', "\\]")
+        .replace('<', "\\<")
+        .replace('>', "\\>")
 }
 
 fn escape_html(s: &str) -> String {
@@ -2235,7 +2238,7 @@ pub fn ticket_list_md(items: &[Item], indices: &[usize]) -> String {
             let label = list_label(item);
             let head = match issue_url(item) {
                 Some(url) => format!("[{}]({})", escape_md_link_text(&label), url),
-                None => label,
+                None => escape_md_link_text(&label),
             };
             format!("- {} - {}\n", head, list_meta(item, &login))
         })
@@ -2703,7 +2706,7 @@ mod tests {
         // Brackets in the title are escaped so the link text doesn't end early.
         assert_eq!(
             lines[1],
-            "- [#4224 \\[FE\\] Copy changes in <Activity> Library](https://github.com/Kinatico/kup-project-management/issues/4224) - In QA, Sprint 31, @vxtien-qa @dev-a"
+            "- [#4224 \\[FE\\] Copy changes in \\<Activity\\> Library](https://github.com/Kinatico/kup-project-management/issues/4224) - In QA, Sprint 31, @vxtien-qa @dev-a"
         );
     }
 

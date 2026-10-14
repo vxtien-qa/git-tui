@@ -32,7 +32,7 @@ fn actions_for(app: &App, item_idx: usize) -> Vec<Action> {
     let has_uat = app.item_has_label(item_idx, "Ready-for-UAT");
     let in_qa_column = matches!(status, Status::InQADev | Status::InQA | Status::InUAT);
     // Bulk verify picks from the In UAT column, so say how big it is.
-    let uat_batch = app.items_in_column(&Status::InUAT).len().max(1);
+    let uat_batch = app.verify_uat_candidates(item_idx).len();
 
     let wrong_column = |expected: &str| Some(format!("needs {}", expected));
 

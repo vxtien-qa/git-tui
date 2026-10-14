@@ -217,7 +217,9 @@ pub fn activate_menu_item(app: &mut App, idx: usize) {
         0 => app.goto(Screen::Board),
         1 => app.goto(Screen::MyTasks),
         2 => {
-            if app.filter_status.is_empty() {
+            // Only a fresh Search gets the default; a loaded saved filter
+            // with no Status on purpose is left as it is.
+            if !app.has_active_filters() {
                 app.filter_status = vec![
                     "!Done".to_string(),
                     "!Tech Complete".to_string(),
