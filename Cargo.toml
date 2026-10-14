@@ -1,6 +1,6 @@
 [package]
 name = "git-tui"
-version = "3.2.0"
+version = "3.3.0"
 rust-version = "1.88.0"
 edition = "2021"
 default-run = "git-tui"
