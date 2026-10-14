@@ -66,6 +66,16 @@ fn confirm_batch(app: &mut App, kind: BatchKind) {
                 bulk: true,
             },
         ),
+        BatchKind::MoveToUat => (
+            format!(
+                "Code is on UAT.\nMove {} ticket(s) to In UAT, remove Ready-for-UAT and comment on each:\n{}\nOne Slack message lists them.",
+                indices.len(),
+                preview
+            ),
+            ConfirmAction::MoveToUat {
+                indices: indices.clone(),
+            },
+        ),
     };
     app.popup = Popup::Confirm {
         title: format!("{} - {} ticket(s)", kind.title(), indices.len()),

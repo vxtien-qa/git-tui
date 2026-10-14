@@ -20,6 +20,9 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
         BatchKind::VerifyUat => {
             "Checked tickets move to Tech Complete, each gets a comment, and one Slack summary goes out."
         }
+        BatchKind::MoveToUat => {
+            "Check the tickets whose code is on UAT: each moves to In UAT, loses Ready-for-UAT and gets a comment; one Slack message lists them. UAT = the d deploy check, if run."
+        }
     };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -65,6 +68,19 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
             num,
             trunc(sprint, 10)
         );
+        // Move to In UAT: what the deploy check said about UAT, if it ran.
+        let uat = if kind == BatchKind::MoveToUat {
+            let mark = match item.and_then(|i| app.uat_deploy_state(i)) {
+                Some(crate::gh::issue::DeployState::Contained) => theme::icon_ok().to_string(),
+                Some(crate::gh::issue::DeployState::Missing) => theme::icon_fail().to_string(),
+                Some(_) => "?".to_string(),
+                None => "-".to_string(),
+            };
+            format!("UAT {:<2} ", mark)
+        } else {
+            String::new()
+        };
+        let fixed = format!("{}{}", fixed, uat);
         let title_w = inner_w.saturating_sub(fixed.chars().count()).max(8);
         let style = if is_cur {
             theme::selected()

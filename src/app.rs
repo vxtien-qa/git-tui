@@ -45,12 +45,15 @@ pub enum Screen {
 pub enum BatchKind {
     /// Pass a UAT regression run: In UAT tickets to Tech Complete.
     VerifyUat,
+    /// Code is on UAT: In QA tickets with Ready-for-UAT to In UAT.
+    MoveToUat,
 }
 
 impl BatchKind {
     pub fn title(self) -> &'static str {
         match self {
             BatchKind::VerifyUat => "Bulk verify UAT",
+            BatchKind::MoveToUat => "Move to In UAT",
         }
     }
 }
@@ -191,6 +194,11 @@ pub enum Popup {
 pub enum ConfirmAction {
     PassDev(usize),
     PassStg(usize),
+    /// Move In QA tickets carrying Ready-for-UAT into In UAT, remove the
+    /// label, comment on each and send one Slack message.
+    MoveToUat {
+        indices: Vec<usize>,
+    },
     /// Move In UAT tickets to Tech Complete, comment on each and send one
     /// Slack message. `bulk` is a regression run picked in Bulk verify UAT;
     /// otherwise it is the one ticket `U` was pressed on.
@@ -754,6 +762,55 @@ impl App {
             .filter(|(_, checked)| *checked)
             .filter_map(|(id, _)| self.items.iter().position(|i| &i.id == id))
             .collect()
+    }
+
+    /// The UAT verdict of a ticket's deploy check, if one ran this session:
+    /// ✗ when any checked PR is missing from the UAT branch, ? when any is
+    /// unknown, ✓ when all are in.
+    pub fn uat_deploy_state(
+        &self,
+        item: &crate::models::item::Item,
+    ) -> Option<crate::gh::issue::DeployState> {
+        use crate::gh::issue::DeployState;
+        let env_idx = self.config.deploy_branches.iter().position(|b| {
+            b.env.eq_ignore_ascii_case("UAT") || b.branch.eq_ignore_ascii_case("uat")
+        })?;
+        let states: Vec<&DeployState> = item
+            .linked_prs
+            .iter()
+            .filter_map(|pr| self.deploy_checks.get(&pr.url))
+            .filter_map(|r| r.get(env_idx).map(|(_, s)| s))
+            .collect();
+        if states.is_empty() {
+            None
+        } else if states.contains(&&DeployState::Missing) {
+            Some(DeployState::Missing)
+        } else if states.iter().all(|s| **s == DeployState::Contained) {
+            Some(DeployState::Contained)
+        } else {
+            Some(DeployState::Unknown)
+        }
+    }
+
+    /// Tickets Move to In UAT offers: In QA with the Ready-for-UAT label, in
+    /// the active sprint, plus the ticket it was opened from, by number.
+    pub fn move_to_uat_candidates(&self, item_idx: usize) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .items_in_column(&Status::InQA)
+            .into_iter()
+            .map(|(i, _)| i)
+            .filter(|&i| self.item_has_label(i, "Ready-for-UAT"))
+            .collect();
+        if !indices.contains(&item_idx) {
+            indices.push(item_idx);
+        }
+        indices.sort_by_key(|i| {
+            self.items
+                .get(*i)
+                .and_then(|it| it.number)
+                .unwrap_or(u32::MAX)
+        });
+        indices
     }
 
     /// One line on where a ticket's merged PRs are, for the status bar:
@@ -2149,6 +2206,38 @@ mod tests {
             app.deploy_summary(&item),
             "Dev: 2/2 in · STG: 1/2 in, 1 ? · UAT: 1/2 in, 1 ? · Prod: 1/2 in"
         );
+    }
+
+    #[test]
+    fn test_uat_deploy_state_takes_the_worst_checked_pr() {
+        use crate::gh::issue::DeployState::*;
+        use crate::models::item::LinkedPr;
+        let mut app = App::new();
+        app.config.deploy_branches = crate::config::Config::default().deploy_branches;
+        let pr = |u: &str| LinkedPr {
+            url: u.into(),
+            state: "MERGED".into(),
+            ..Default::default()
+        };
+        let item = Item {
+            linked_prs: vec![pr("a"), pr("b")],
+            ..Default::default()
+        };
+        assert_eq!(app.uat_deploy_state(&item), None);
+        let env = |uat: crate::gh::issue::DeployState| {
+            vec![
+                ("Dev".to_string(), Contained),
+                ("STG".to_string(), Contained),
+                ("UAT".to_string(), uat),
+                ("Prod".to_string(), Missing),
+            ]
+        };
+        app.deploy_checks.insert("a".into(), env(Contained));
+        assert_eq!(app.uat_deploy_state(&item), Some(Contained));
+        app.deploy_checks.insert("b".into(), env(Unknown));
+        assert_eq!(app.uat_deploy_state(&item), Some(Unknown));
+        app.deploy_checks.insert("b".into(), env(Missing));
+        assert_eq!(app.uat_deploy_state(&item), Some(Missing));
     }
 
     #[test]

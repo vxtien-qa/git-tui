@@ -1284,6 +1284,7 @@ mod render_tests {
             Screen::TaskForm(Some(2)),
             Screen::AssigneePicker(AssigneeContext::Bug(Some(2), true)),
             Screen::BatchPicker(crate::app::BatchKind::VerifyUat),
+            Screen::BatchPicker(crate::app::BatchKind::MoveToUat),
         ]
     }
 
@@ -1341,11 +1342,16 @@ mod render_tests {
                 .chain(std::iter::once(("gone".to_string(), true)))
                 .collect();
             app.batch_cursor = 7;
-            app.screen = Screen::BatchPicker(crate::app::BatchKind::VerifyUat);
-            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
-            terminal
-                .draw(|f| draw(f, &mut app))
-                .unwrap_or_else(|e| panic!("pick list at {}x{} failed: {}", w, h, e));
+            for kind in [
+                crate::app::BatchKind::VerifyUat,
+                crate::app::BatchKind::MoveToUat,
+            ] {
+                app.screen = Screen::BatchPicker(kind);
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+                terminal
+                    .draw(|f| draw(f, &mut app))
+                    .unwrap_or_else(|e| panic!("pick list at {}x{} failed: {}", w, h, e));
+            }
         }
     }
 
@@ -1562,6 +1568,38 @@ mod snapshot_tool {
                     }
                 }
                 app.screen = Screen::ItemDetail(idx);
+            }
+            // Move to In UAT opened with I from a labelled In QA ticket.
+            "move-to-uat" => {
+                app.board_sprint_filter = None;
+                let has_label = |i: &crate::models::item::Item| {
+                    i.labels.iter().any(|l| App::label_eq(l, "Ready-for-UAT"))
+                };
+                // Nothing qualifies right now: label a few In QA tickets, in
+                // memory only.
+                if !app
+                    .items
+                    .iter()
+                    .any(|i| i.status == crate::models::status::Status::InQA && has_label(i))
+                {
+                    for item in app
+                        .items
+                        .iter_mut()
+                        .filter(|i| i.status == crate::models::status::Status::InQA)
+                        .take(4)
+                    {
+                        item.labels.push("Ready-for-UAT".into());
+                    }
+                }
+                let Some(idx) = app
+                    .items
+                    .iter()
+                    .position(|i| i.status == crate::models::status::Status::InQA && has_label(i))
+                else {
+                    return false;
+                };
+                app.screen = Screen::ItemDetail(idx);
+                handlers::detail::handle_detail(app, KeyCode::Char('I'), idx);
             }
             // Bulk verify UAT opened with V from the first In UAT ticket.
             "verify-uat" | "qa-menu-uat" => {

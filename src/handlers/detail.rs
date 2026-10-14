@@ -9,6 +9,7 @@ enum PassKind {
     Dev,
     Stg,
     Uat,
+    ToUat,
     Return,
     Fail,
 }
@@ -52,6 +53,21 @@ fn qa_pass_allowed(app: &App, item_idx: usize, kind: PassKind) -> Result<(), Str
                     "Pass UAT applies to items in 'In UAT' - this one is '{}'.",
                     status_label
                 ))
+            } else {
+                Ok(())
+            }
+        }
+        PassKind::ToUat => {
+            if item.status != Status::InQA {
+                Err(format!(
+                    "Move to In UAT applies to items in 'In QA' - this one is '{}'.",
+                    status_label
+                ))
+            } else if !app.item_has_label(item_idx, "Ready-for-UAT") {
+                Err(
+                    "Move to In UAT needs the Ready-for-UAT label: pass it on STG first (P)."
+                        .to_string(),
+                )
             } else {
                 Ok(())
             }
@@ -185,6 +201,18 @@ fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
                     bulk: false,
                 },
             );
+            true
+        }
+        KeyCode::Char('I') => {
+            match qa_pass_allowed(app, item_idx, PassKind::ToUat) {
+                Ok(()) => {
+                    let rows = app.move_to_uat_candidates(item_idx);
+                    // Each ticket's deploy is its own: only the one in hand
+                    // starts checked.
+                    app.open_batch_picker(BatchKind::MoveToUat, &rows, |i| i == item_idx);
+                }
+                Err(msg) => app.popup = Popup::Error(msg),
+            }
             true
         }
         KeyCode::Char('V') => {
@@ -741,6 +769,71 @@ mod tests {
         ];
         app.board_sprint_filter = Some("Sprint 28".to_string());
         assert_eq!(uat_batch(&app, 0), vec![1, 0]);
+    }
+
+    #[test]
+    fn test_move_to_uat_guard_and_candidates() {
+        let mut app = App::new();
+        let with_label = |id: &str, n: u32, sprint: &str, status: Status, label: bool| {
+            let mut it = uat_item(id, n, sprint, status);
+            if label {
+                it.labels = vec!["Ready-for-UAT".into()];
+            }
+            it
+        };
+        app.items = vec![
+            with_label("a", 405, "Sprint 31", Status::InQA, true),
+            with_label("b", 401, "Sprint 31", Status::InQA, false), // not passed on STG
+            with_label("c", 403, "Sprint 31", Status::InQA, true),
+            with_label("d", 402, "Sprint 30", Status::InQA, true), // other sprint
+            with_label("e", 404, "Sprint 31", Status::InUAT, true), // already moved
+        ];
+        app.board_sprint_filter = Some("Sprint 31".to_string());
+
+        assert!(qa_pass_allowed(&app, 0, PassKind::ToUat).is_ok());
+        let no_label = qa_pass_allowed(&app, 1, PassKind::ToUat).unwrap_err();
+        assert!(no_label.contains("Ready-for-UAT"), "{}", no_label);
+        assert!(qa_pass_allowed(&app, 4, PassKind::ToUat).is_err());
+
+        // The sprint's labelled In QA tickets, by number; the one opened from
+        // another sprint is still included.
+        assert_eq!(app.move_to_uat_candidates(0), vec![2, 0]);
+        assert_eq!(app.move_to_uat_candidates(3), vec![3, 2, 0]);
+
+        // I opens the pick list with only the ticket in hand checked.
+        app.screen = Screen::ItemDetail(0);
+        assert!(confirm_qa_action(&mut app, KeyCode::Char('I'), 0));
+        assert_eq!(app.screen, Screen::BatchPicker(BatchKind::MoveToUat));
+        assert_eq!(app.batch_checked_indices(), vec![0]);
+        assert_eq!(app.batch_rows.len(), 2);
+    }
+
+    #[test]
+    fn test_u_passes_only_the_ticket_in_hand() {
+        let mut app = App::new();
+        app.items = vec![
+            uat_item("a", 401, "Sprint 28", Status::InUAT),
+            uat_item("b", 402, "Sprint 28", Status::InUAT),
+        ];
+        app.board_sprint_filter = Some("Sprint 28".to_string());
+        app.screen = Screen::ItemDetail(1);
+        assert!(confirm_qa_action(&mut app, KeyCode::Char('U'), 1));
+        match &app.popup {
+            Popup::Confirm {
+                on_confirm: ConfirmAction::PassUat { indices, bulk },
+                ..
+            } => {
+                assert_eq!(indices, &vec![1]);
+                assert!(!bulk);
+            }
+            other => panic!("expected a Pass UAT confirm, got {:?}", other),
+        }
+
+        // V opens the pick list over the whole column, all checked.
+        app.popup = Popup::None;
+        assert!(confirm_qa_action(&mut app, KeyCode::Char('V'), 1));
+        assert_eq!(app.screen, Screen::BatchPicker(BatchKind::VerifyUat));
+        assert_eq!(app.batch_checked_indices(), vec![0, 1]);
     }
 
     #[test]

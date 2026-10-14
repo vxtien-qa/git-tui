@@ -40,6 +40,9 @@ pub struct SlackNotifyConfig {
     /// Notify when a task is created
     #[serde(default = "default_true")]
     pub new_task: bool,
+    /// Notify when QA moves tickets whose code reached UAT into In UAT
+    #[serde(default = "default_true")]
+    pub move_to_uat: bool,
 }
 
 fn default_true() -> bool {
@@ -60,13 +63,14 @@ impl Default for SlackNotifyConfig {
             daily_standup: true,
             sprint_report: true,
             new_task: true,
+            move_to_uat: true,
         }
     }
 }
 
 impl SlackNotifyConfig {
     /// Labels for display in the config screen (ordered).
-    pub const LABELS: [&str; 11] = [
+    pub const LABELS: [&str; 12] = [
         "Pass Dev",
         "Pass STG",
         "Pass UAT",
@@ -78,6 +82,7 @@ impl SlackNotifyConfig {
         "Daily Standup",
         "Sprint Report",
         "New Task",
+        "Move to In UAT",
     ];
 
     /// Get toggle value by index.
@@ -94,6 +99,7 @@ impl SlackNotifyConfig {
             8 => self.daily_standup,
             9 => self.sprint_report,
             10 => self.new_task,
+            11 => self.move_to_uat,
             _ => false,
         }
     }
@@ -112,6 +118,7 @@ impl SlackNotifyConfig {
             8 => self.daily_standup = !self.daily_standup,
             9 => self.sprint_report = !self.sprint_report,
             10 => self.new_task = !self.new_task,
+            11 => self.move_to_uat = !self.move_to_uat,
             _ => {}
         }
     }

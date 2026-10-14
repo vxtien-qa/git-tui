@@ -52,6 +52,184 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                 slack_user_map.clone(),
             );
         }
+        ConfirmAction::MoveToUat { indices } => {
+            if matches!(app.screen, crate::app::Screen::BatchPicker(_)) {
+                app.go_back();
+            }
+            let Some(field) = app.status_field().cloned() else {
+                app.set_status(
+                    "Move to In UAT failed: project fields not loaded yet - refresh and retry",
+                );
+                return;
+            };
+            let Some(pid) = app.project_id.clone() else {
+                app.set_status(
+                    "Move to In UAT failed: project fields not loaded yet - refresh and retry",
+                );
+                return;
+            };
+            let Some(option) = field.find_option(Status::InUAT.label()).cloned() else {
+                app.popup = Popup::Error(format!(
+                    "Move to In UAT failed: status option '{}' not found on the project.",
+                    Status::InUAT.label()
+                ));
+                return;
+            };
+
+            let mut targets: Vec<UatTarget> = Vec::new();
+            let mut drafts = 0usize;
+            let mut slack_items: Vec<slack::notifier::ReleaseItem> = Vec::new();
+            let mut slack_devs: Vec<String> = Vec::new();
+            for &idx in indices {
+                let Some(item) = app.items.get(idx) else {
+                    continue;
+                };
+                let (Some(number), Some(repo)) = (item.number, item.repository.clone()) else {
+                    drafts += 1;
+                    continue;
+                };
+                for d in item.dev_assignees(&app.current_user) {
+                    if !slack_devs.contains(&d) {
+                        slack_devs.push(d);
+                    }
+                }
+                slack_items.push(slack::notifier::ReleaseItem {
+                    number: Some(number),
+                    repo: Some(repo.clone()),
+                    title: item.title.clone(),
+                });
+                targets.push(UatTarget {
+                    item_id: item.id.clone(),
+                    number,
+                    repo,
+                    comment: "Code is on UAT. Moving to In UAT for verification.".to_string(),
+                });
+            }
+            if targets.is_empty() {
+                app.popup = Popup::Error(
+                    "Move to In UAT: none of these items has a linked GitHub issue (draft items)."
+                        .to_string(),
+                );
+                return;
+            }
+
+            // Optimistic local move; a revalidation abort puts it back.
+            for &idx in indices {
+                if let Some(item) = app.items.get_mut(idx) {
+                    if item.number.is_some() {
+                        item.status = Status::InUAT;
+                    }
+                }
+            }
+
+            let field_id = field.id.clone();
+            let option_id = option.id.clone();
+            let notify = slack_notify.move_to_uat;
+            let tx = app.action_tx.clone();
+            app.loading = true;
+            app.set_status(&format!(
+                "Move to In UAT: moving {} ticket(s)...",
+                targets.len()
+            ));
+
+            std::thread::spawn(move || {
+                let mut moved: Vec<usize> = Vec::new();
+                let mut notes: Vec<String> = Vec::new();
+                if drafts > 0 {
+                    notes.push(format!(
+                        "{} draft item(s) skipped (no linked issue)",
+                        drafts
+                    ));
+                }
+                for (i, t) in targets.iter().enumerate() {
+                    // A dev may have moved it since the list was opened.
+                    if let Ok(Some(remote)) = gh::item::get_item_status(&t.item_id) {
+                        let actual = Status::from_str(&remote);
+                        if actual != Status::InQA {
+                            let _ = tx.send(crate::app::ActionResult::ParentStatusChanged {
+                                item_id: t.item_id.clone(),
+                                status: actual.clone(),
+                            });
+                            notes.push(format!(
+                                "aborted: #{} is now '{}'",
+                                t.number,
+                                actual.label()
+                            ));
+                            continue;
+                        }
+                    }
+                    if let Err(e) = gh::item::edit_field(&t.item_id, &pid, &field_id, &option_id) {
+                        let _ = tx.send(crate::app::ActionResult::ParentStatusChanged {
+                            item_id: t.item_id.clone(),
+                            status: Status::InQA,
+                        });
+                        notes.push(format!("failed: #{}: {}", t.number, e));
+                        continue;
+                    }
+                    let (_, label_failed) = strip_handoff_labels(
+                        &tx,
+                        &t.item_id,
+                        &t.repo,
+                        t.number,
+                        &["Ready-for-UAT"],
+                    );
+                    if !label_failed.is_empty() {
+                        notes.push(format!(
+                            "#{}: moved, but {} is still on it",
+                            t.number,
+                            label_failed.join(" + ")
+                        ));
+                    }
+                    if let Err(e) = gh::issue::comment(&t.repo, t.number, &t.comment) {
+                        notes.push(format!("#{}: moved, comment failed ({})", t.number, e));
+                    }
+                    moved.push(i);
+                }
+
+                let mut slack_note = String::new();
+                if !moved.is_empty() && notify {
+                    if let Some(ref url) = slack_url {
+                        let listed: Vec<slack::notifier::ReleaseItem> = moved
+                            .iter()
+                            .filter_map(|i| slack_items.get(*i))
+                            .map(|r| slack::notifier::ReleaseItem {
+                                number: r.number,
+                                repo: r.repo.clone(),
+                                title: r.title.clone(),
+                            })
+                            .collect();
+                        slack_note = match slack::notifier::notify_batch(
+                            url,
+                            &slack::notifier::BatchNotice::moved_to_uat(listed.len()),
+                            &slack_user,
+                            &listed,
+                            &slack_devs,
+                            &slack_user_map,
+                        ) {
+                            Ok(()) => ", ✓ Slack sent".to_string(),
+                            Err(_) => ", ✗ Slack message failed".to_string(),
+                        };
+                    }
+                }
+
+                let headline = format!(
+                    "Move to In UAT: ✓ {} ticket(s) moved{}",
+                    moved.len(),
+                    slack_note
+                );
+                let result = if notes.is_empty() {
+                    crate::app::ActionResult::Success(headline)
+                } else if moved.is_empty() {
+                    crate::app::ActionResult::Error(format!(
+                        "Move to In UAT: nothing was moved.\n{}",
+                        notes.join("\n")
+                    ))
+                } else {
+                    crate::app::ActionResult::Error(format!("{}\n{}", headline, notes.join("\n")))
+                };
+                let _ = tx.send(result);
+            });
+        }
         ConfirmAction::PassUat { indices, bulk } => {
             let bulk = *bulk;
             // Picked in Bulk verify UAT: the pick list has done its job.

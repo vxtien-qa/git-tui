@@ -84,6 +84,14 @@ fn remap_confirm_action(
     match action {
         ConfirmAction::PassDev(idx) => remap(*idx).map(ConfirmAction::PassDev),
         ConfirmAction::PassStg(idx) => remap(*idx).map(ConfirmAction::PassStg),
+        ConfirmAction::MoveToUat { indices } => {
+            let remapped: Vec<usize> = indices.iter().filter_map(|i| remap(*i)).collect();
+            if remapped.is_empty() {
+                None
+            } else {
+                Some(ConfirmAction::MoveToUat { indices: remapped })
+            }
+        }
         ConfirmAction::PassUat { indices, bulk } => {
             let remapped: Vec<usize> = indices.iter().filter_map(|i| remap(*i)).collect();
             if remapped.is_empty() {

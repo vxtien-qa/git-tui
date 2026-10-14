@@ -78,6 +78,18 @@ fn actions_for(app: &App, item_idx: usize) -> Vec<Action> {
             blocked_reason: wrong_column("In UAT"),
         },
         Action {
+            key: "I",
+            name: "Move to In UAT",
+            effect: "code is on UAT: pick In QA + Ready-for-UAT tickets to move into In UAT"
+                .to_string(),
+            available: status == Status::InQA && has_uat,
+            blocked_reason: if status != Status::InQA {
+                wrong_column("In QA")
+            } else {
+                Some("needs the Ready-for-UAT label (pass on STG first)".to_string())
+            },
+        },
+        Action {
             key: "f",
             name: "Fail (new bug)",
             // In UAT the run is a regression pass, so a finding is often in a

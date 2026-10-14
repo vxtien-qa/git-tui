@@ -144,6 +144,15 @@ impl BatchNotice {
         }
     }
 
+    /// QA moved `n` tickets whose code reached UAT into In UAT.
+    pub fn moved_to_uat(n: usize) -> Self {
+        BatchNotice {
+            emoji: "🚀",
+            tag: "In UAT",
+            headline: format!("{} ticket(s) on UAT, moved to In UAT for verification", n),
+        }
+    }
+
     /// One ticket verified on UAT on its own.
     pub fn verified_on_uat() -> Self {
         BatchNotice {
