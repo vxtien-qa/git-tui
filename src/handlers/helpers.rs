@@ -125,6 +125,7 @@ fn remap_confirm_action(
         | ConfirmAction::SendSprintReportToSlack
         | ConfirmAction::MarkAllNotificationsRead
         | ConfirmAction::DeleteStackLead(_)
+        | ConfirmAction::DeleteSearchPreset(_)
         | ConfirmAction::Quit => Some(action.clone()),
     }
 }

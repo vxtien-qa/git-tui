@@ -132,6 +132,11 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
             "Ctrl+Y",
             "Copy results as a linked list: m = Markdown, s = Slack",
         ),
+        key_line("Ctrl+S", "Save the keyword + filters under a name"),
+        key_line(
+            "Ctrl+O",
+            "Saved filters: Enter load, d delete (sprints follow @current)",
+        ),
         key_line("Esc", "Back (filters kept)"),
         Line::from(""),
         section("Bug / Enhancement / Task forms"),

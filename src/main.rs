@@ -647,6 +647,10 @@ fn handle_event(app: &mut App, ev: Event) {
                 Popup::Error(_) | Popup::Success(_) => {
                     app.popup = Popup::None;
                 }
+                Popup::SavePreset { .. } => {
+                    handlers::search::handle_save_preset(app, key.code, key.modifiers)
+                }
+                Popup::Presets { .. } => handlers::search::handle_presets(app, key.code),
                 Popup::CopyResults => match key.code {
                     KeyCode::Char('m') | KeyCode::Char('M') => {
                         handlers::search::copy_results(app, handlers::search::CopyFormat::Markdown)
@@ -930,6 +934,21 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Popup::Error(msg) => ui::dialog::render_error(f, msg),
         Popup::Success(msg) => ui::dialog::render_success(f, msg),
         Popup::Confirm { title, message, .. } => ui::dialog::render_confirm(f, title, message),
+        Popup::SavePreset { name } => ui::dialog::render_text_prompt(
+            f,
+            "Save filters",
+            "Name these filters (same name replaces):",
+            name,
+        ),
+        Popup::Presets { selected } => {
+            let names: Vec<String> = app
+                .config
+                .search_presets
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            ui::dialog::render_pick_list(f, "Saved filters", &names, *selected)
+        }
         Popup::CopyResults => ui::dialog::render_choice(
             f,
             "Copy results",
@@ -1261,6 +1280,10 @@ mod render_tests {
             ),
             Popup::Success("Done".to_string()),
             Popup::CopyResults,
+            Popup::SavePreset {
+                name: "A filter name long enough to scroll inside the prompt box".to_string(),
+            },
+            Popup::Presets { selected: 5 },
             Popup::Confirm {
                 title: "Move 3 item(s)".to_string(),
                 message: "Move to In UAT?\n#401, #402, #403".to_string(),
@@ -1270,6 +1293,12 @@ mod render_tests {
         for (w, h) in [(60u16, 10u16), (80, 24), (200, 60)] {
             for popup in &popups {
                 let mut app = app_with_items();
+                app.config.search_presets = (0..8)
+                    .map(|i| crate::config::SearchPreset {
+                        name: format!("Saved filter number {} with a long name", i),
+                        ..Default::default()
+                    })
+                    .collect();
                 app.screen = Screen::Board;
                 app.popup = popup.clone();
                 let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
@@ -1354,6 +1383,28 @@ mod snapshot_tool {
                 app.filter_label = vec!["!Ready-for-UAT".to_string()];
                 app.filter_assignee = vec![app.config.current_user.clone()];
                 app.apply_filters();
+            }
+            "search-presets" => {
+                app.screen = Screen::Search;
+                app.config.search_presets = vec![
+                    crate::config::SearchPreset {
+                        name: "In QA - not passed STG - mine".into(),
+                        ..Default::default()
+                    },
+                    crate::config::SearchPreset {
+                        name: "Dave epic, this sprint".into(),
+                        ..Default::default()
+                    },
+                ];
+                app.apply_filters();
+                app.popup = Popup::Presets { selected: 1 };
+            }
+            "search-save" => {
+                app.screen = Screen::Search;
+                app.apply_filters();
+                app.popup = Popup::SavePreset {
+                    name: "In QA mine".into(),
+                };
             }
             "search-copy" => {
                 app.screen = Screen::Search;

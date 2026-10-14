@@ -159,6 +159,8 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
             // keys it can't show come first and survive a narrow terminal.
             ("Tab", "Field"),
             ("Ctrl+Y", "Copy list"),
+            ("Ctrl+O", "Saved"),
+            ("Ctrl+S", "Save"),
             ("Space", "Toggle"),
             (theme::icon_left_right(), "Option"),
             ("Enter", "Search/Open"),

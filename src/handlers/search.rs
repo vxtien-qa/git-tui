@@ -13,7 +13,20 @@ pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
             clear_all_filters(app);
             app.set_status("Filters cleared");
         }
-        // Letter keys type into the keyword box, so copying takes Ctrl.
+        // Letter keys type into the keyword box, so saving, opening and
+        // copying take Ctrl.
+        KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.popup = crate::app::Popup::SavePreset {
+                name: String::new(),
+            };
+        }
+        KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.config.search_presets.is_empty() {
+                app.set_status("No saved filters yet - Ctrl+S saves the current ones");
+            } else {
+                app.popup = crate::app::Popup::Presets { selected: 0 };
+            }
+        }
         KeyCode::Char('y') if modifiers.contains(KeyModifiers::CONTROL) => {
             if app.search_results.is_empty() {
                 app.set_status("No results to copy");
@@ -160,6 +173,94 @@ pub fn copy_results(app: &mut App, format: CopyFormat) {
         )),
         Err(e) => crate::app::Popup::Error(e),
     };
+}
+
+/// Keys while naming the current filters (`Popup::SavePreset`).
+pub fn handle_save_preset(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
+    let crate::app::Popup::SavePreset { name } = &mut app.popup else {
+        return;
+    };
+    match key {
+        KeyCode::Esc => app.popup = crate::app::Popup::None,
+        KeyCode::Backspace => {
+            name.pop();
+        }
+        KeyCode::Enter => {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            let replaced = app.config.search_presets.iter().any(|p| p.name == name);
+            app.upsert_search_preset(&name);
+            app.popup = match app.config.save() {
+                Ok(()) => crate::app::Popup::Success(format!(
+                    "{} saved filter '{}'. Ctrl+O opens it.",
+                    if replaced { "Updated" } else { "Saved" },
+                    name
+                )),
+                Err(e) => crate::app::Popup::Error(format!("Failed to save config: {}", e)),
+            };
+        }
+        KeyCode::Char(c)
+            if !modifiers.contains(KeyModifiers::CONTROL) && name.chars().count() < 40 =>
+        {
+            name.push(c);
+        }
+        _ => {}
+    }
+}
+
+/// Keys in the saved-filters list (`Popup::Presets`).
+pub fn handle_presets(app: &mut App, key: KeyCode) {
+    let crate::app::Popup::Presets { selected } = app.popup else {
+        return;
+    };
+    let count = app.config.search_presets.len();
+    if count == 0 {
+        app.popup = crate::app::Popup::None;
+        return;
+    }
+    let selected = selected.min(count - 1);
+    match key {
+        KeyCode::Esc => app.popup = crate::app::Popup::None,
+        KeyCode::Up => {
+            app.popup = crate::app::Popup::Presets {
+                selected: selected.saturating_sub(1),
+            }
+        }
+        KeyCode::Down => {
+            app.popup = crate::app::Popup::Presets {
+                selected: (selected + 1).min(count - 1),
+            }
+        }
+        KeyCode::Enter => {
+            let preset = app.config.search_presets[selected].clone();
+            let dropped = app.apply_search_preset(&preset);
+            app.popup = crate::app::Popup::None;
+            if dropped.is_empty() {
+                app.set_status(&format!(
+                    "Loaded '{}': {} result(s)",
+                    preset.name,
+                    app.search_results.len()
+                ));
+            } else {
+                app.set_status(&format!(
+                    "Loaded '{}' without {} (no such sprint now)",
+                    preset.name,
+                    dropped.join(", ")
+                ));
+            }
+        }
+        KeyCode::Char('d') => {
+            let name = app.config.search_presets[selected].name.clone();
+            app.popup = crate::app::Popup::Confirm {
+                title: "Delete saved filter".to_string(),
+                message: format!("Delete the saved filter '{}'?", name),
+                on_confirm: crate::app::ConfirmAction::DeleteSearchPreset(name),
+            };
+        }
+        _ => {}
+    }
 }
 
 /// Reset the search query and every filter field.

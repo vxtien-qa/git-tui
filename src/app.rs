@@ -159,6 +159,14 @@ pub enum Popup {
     Success(String),
     /// Choose the format for copying the Search results.
     CopyResults,
+    /// Name the current Search filters to save them.
+    SavePreset {
+        name: String,
+    },
+    /// Pick a saved Search filter (index into `config.search_presets`).
+    Presets {
+        selected: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -187,6 +195,8 @@ pub enum ConfirmAction {
     SendSprintReportToSlack,
     MarkAllNotificationsRead,
     DeleteStackLead(String),
+    /// Delete a saved Search filter, by name.
+    DeleteSearchPreset(String),
     Quit,
 }
 
@@ -1147,6 +1157,125 @@ impl App {
         labels
     }
 
+    /// The sprints a preset can name relatively: `@current`, `@previous`,
+    /// `@next`, with today's names.
+    pub fn relative_sprints(&self) -> Vec<(&'static str, String)> {
+        let sprints = self.available_sprints();
+        let Some(current) = self.current_sprint_name() else {
+            return Vec::new();
+        };
+        let Some(idx) = sprints.iter().position(|s| *s == current) else {
+            return Vec::new();
+        };
+        let mut out = vec![("@current", current)];
+        if idx > 0 {
+            out.push(("@previous", sprints[idx - 1].clone()));
+        }
+        if let Some(next) = sprints.get(idx + 1) {
+            out.push(("@next", next.clone()));
+        }
+        out
+    }
+
+    /// The current Search as a preset named `name`.
+    pub fn search_preset(&self, name: &str) -> crate::config::SearchPreset {
+        self.search_preset_with(name, &self.relative_sprints())
+    }
+
+    /// `search_preset` against explicit relative sprints (the testable seam:
+    /// which sprint is current depends on today's date).
+    fn search_preset_with(
+        &self,
+        name: &str,
+        relative: &[(&'static str, String)],
+    ) -> crate::config::SearchPreset {
+        let to_token = |value: &String| {
+            let (bang, sprint) = match value.strip_prefix('!') {
+                Some(rest) => ("!", rest),
+                None => ("", value.as_str()),
+            };
+            match relative.iter().find(|(_, n)| n == sprint) {
+                Some((token, _)) => format!("{}{}", bang, token),
+                None => value.clone(),
+            }
+        };
+        crate::config::SearchPreset {
+            name: name.to_string(),
+            query: self.search_query.clone(),
+            status: self.filter_status.clone(),
+            priority: self.filter_priority.clone(),
+            stack: self.filter_stack.clone(),
+            sprint: self.filter_sprint.iter().map(to_token).collect(),
+            label: self.filter_label.clone(),
+            epic: self.filter_epic.clone(),
+            assignee: self.filter_assignee.clone(),
+        }
+    }
+
+    /// Save the current Search under `name`, replacing a preset of that name.
+    /// Only `config` in memory changes; the caller persists it.
+    pub fn upsert_search_preset(&mut self, name: &str) {
+        let preset = self.search_preset(name);
+        self.upsert_preset(preset);
+    }
+
+    fn upsert_preset(&mut self, preset: crate::config::SearchPreset) {
+        let name = preset.name.clone();
+        match self
+            .config
+            .search_presets
+            .iter_mut()
+            .find(|p| p.name == name)
+        {
+            Some(existing) => *existing = preset,
+            None => self.config.search_presets.push(preset),
+        }
+    }
+
+    /// Load a preset into Search. Returns the sprint tokens it could not
+    /// resolve (no iteration data, or no such sprint any more), which are
+    /// left out rather than silently matching nothing.
+    pub fn apply_search_preset(&mut self, preset: &crate::config::SearchPreset) -> Vec<String> {
+        let relative = self.relative_sprints();
+        self.apply_search_preset_with(preset, &relative)
+    }
+
+    /// `apply_search_preset` against explicit relative sprints.
+    fn apply_search_preset_with(
+        &mut self,
+        preset: &crate::config::SearchPreset,
+        relative: &[(&'static str, String)],
+    ) -> Vec<String> {
+        let mut dropped = Vec::new();
+        let mut sprint = Vec::new();
+        for value in &preset.sprint {
+            let (bang, name) = match value.strip_prefix('!') {
+                Some(rest) => ("!", rest),
+                None => ("", value.as_str()),
+            };
+            if name.starts_with('@') {
+                match relative.iter().find(|(token, _)| *token == name) {
+                    Some((_, resolved)) => sprint.push(format!("{}{}", bang, resolved)),
+                    None => dropped.push(value.clone()),
+                }
+            } else {
+                sprint.push(value.clone());
+            }
+        }
+        self.search_query = preset.query.clone();
+        self.filter_status = preset.status.clone();
+        self.filter_priority = preset.priority.clone();
+        self.filter_stack = preset.stack.clone();
+        self.filter_sprint = sprint;
+        self.filter_label = preset.label.clone();
+        self.filter_epic = preset.epic.clone();
+        self.filter_assignee = preset.assignee.clone();
+        self.filter_cursor = vec![0; Self::SEARCH_FILTER_ROWS];
+        self.search_field_idx = 0;
+        self.apply_filters();
+        dropped
+    }
+
     /// Every login assigned on the board, sorted, then [`App::NO_ASSIGNEE`].
     pub fn available_assignees(&self) -> Vec<String> {
         let mut logins: Vec<String> = self
@@ -1801,6 +1930,85 @@ mod tests {
             .map(|(_, i)| i.id.as_str())
             .collect();
         assert_eq!(ids, vec!["1", "2"]);
+    }
+
+    fn relative() -> Vec<(&'static str, String)> {
+        vec![
+            ("@current", "Sprint 31".to_string()),
+            ("@previous", "Sprint 30".to_string()),
+            ("@next", "Sprint 32".to_string()),
+        ]
+    }
+
+    #[test]
+    fn test_search_preset_saves_sprints_relative_to_today() {
+        let mut app = App::new();
+        app.search_query = "copy".into();
+        app.filter_status = vec!["In QA".into()];
+        app.filter_sprint = vec!["Sprint 31".into(), "!Sprint 30".into(), "Sprint 12".into()];
+        app.filter_label = vec!["!Ready-for-UAT".into()];
+        app.filter_epic = vec!["acme/board#3111".into()];
+        app.filter_assignee = vec!["vxtien-qa".into()];
+
+        let preset = app.search_preset_with("In QA mine", &relative());
+        assert_eq!(preset.name, "In QA mine");
+        assert_eq!(preset.query, "copy");
+        // Current and previous become tokens; an old sprint stays by name.
+        assert_eq!(preset.sprint, vec!["@current", "!@previous", "Sprint 12"]);
+        assert_eq!(preset.label, vec!["!Ready-for-UAT"]);
+        assert_eq!(preset.epic, vec!["acme/board#3111"]);
+        assert_eq!(preset.assignee, vec!["vxtien-qa"]);
+
+        // Two weeks later the same preset means the new current sprint.
+        let later = vec![
+            ("@current", "Sprint 32".to_string()),
+            ("@previous", "Sprint 31".to_string()),
+        ];
+        let mut fresh = App::new();
+        let dropped = fresh.apply_search_preset_with(&preset, &later);
+        assert!(dropped.is_empty());
+        assert_eq!(
+            fresh.filter_sprint,
+            vec!["Sprint 32", "!Sprint 31", "Sprint 12"]
+        );
+        assert_eq!(fresh.search_query, "copy");
+        assert_eq!(fresh.filter_assignee, vec!["vxtien-qa"]);
+        assert_eq!(fresh.search_field_idx, 0);
+        assert_eq!(fresh.filter_cursor.len(), App::SEARCH_FILTER_ROWS);
+    }
+
+    #[test]
+    fn test_apply_search_preset_drops_sprints_it_cannot_resolve() {
+        let preset = crate::config::SearchPreset {
+            name: "next".into(),
+            sprint: vec!["@next".into(), "Sprint 9".into()],
+            ..Default::default()
+        };
+        let mut app = App::new();
+        let dropped = app.apply_search_preset_with(&preset, &[("@current", "Sprint 31".into())]);
+        assert_eq!(dropped, vec!["@next"]);
+        assert_eq!(app.filter_sprint, vec!["Sprint 9"]);
+    }
+
+    #[test]
+    fn test_upsert_preset_replaces_by_name() {
+        let mut app = App::new();
+        app.config.search_presets.clear();
+        let mk = |name: &str, query: &str| crate::config::SearchPreset {
+            name: name.into(),
+            query: query.into(),
+            ..Default::default()
+        };
+        app.upsert_preset(mk("a", "one"));
+        app.upsert_preset(mk("b", "two"));
+        app.upsert_preset(mk("a", "three"));
+        let names: Vec<(&str, &str)> = app
+            .config
+            .search_presets
+            .iter()
+            .map(|p| (p.name.as_str(), p.query.as_str()))
+            .collect();
+        assert_eq!(names, vec![("a", "three"), ("b", "two")]);
     }
 
     #[test]

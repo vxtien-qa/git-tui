@@ -126,6 +126,32 @@ pub struct SlackUserMapping {
     pub slack_display: String,
 }
 
+/// A saved Search: the keyword and every filter row, under a name.
+///
+/// Filter values are stored the way the rows store them (`!` prefix for an
+/// exclude). Sprints equal to the current, previous or next sprint are saved
+/// as `@current`, `@previous`, `@next` so a preset follows the calendar.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchPreset {
+    pub name: String,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub status: Vec<String>,
+    #[serde(default)]
+    pub priority: Vec<String>,
+    #[serde(default)]
+    pub stack: Vec<String>,
+    #[serde(default)]
+    pub sprint: Vec<String>,
+    #[serde(default)]
+    pub label: Vec<String>,
+    #[serde(default)]
+    pub epic: Vec<String>,
+    #[serde(default)]
+    pub assignee: Vec<String>,
+}
+
 /// User configuration persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -163,6 +189,9 @@ pub struct Config {
     /// Stack → Lead usernames mapping (e.g. "FE" → ["fe-lead"])
     #[serde(default = "default_stack_leads")]
     pub stack_leads: HashMap<String, Vec<String>>,
+    /// Saved Search filters, in the order they were first saved.
+    #[serde(default)]
+    pub search_presets: Vec<SearchPreset>,
 }
 
 fn default_timezone() -> i32 {
@@ -195,6 +224,7 @@ impl Default for Config {
             slack_bot_token: None,
             slack_user_map: HashMap::new(),
             stack_leads: default_stack_leads(),
+            search_presets: Vec::new(),
         }
     }
 }
@@ -304,6 +334,24 @@ mod tests {
         c.stack_leads.insert("FE".into(), vec!["fe-lead".into()]);
         c.stack_leads.insert("BE".into(), vec!["be-lead".into()]);
         c
+    }
+
+    #[test]
+    fn test_config_without_search_presets_still_loads() {
+        // A config written before saved filters existed.
+        let json = r#"{"owner":"acme","project_number":9,"current_user":"qa",
+            "bug_repo":"acme/board","poll_interval_secs":180}"#;
+        let config: Config = serde_json::from_str(json).expect("old config loads");
+        assert!(config.search_presets.is_empty());
+
+        // And a preset round-trips, missing rows defaulting to empty.
+        let json = r#"{"owner":"acme","project_number":9,"current_user":"qa",
+            "bug_repo":"acme/board","poll_interval_secs":180,
+            "search_presets":[{"name":"mine","sprint":["@current"]}]}"#;
+        let config: Config = serde_json::from_str(json).expect("preset loads");
+        assert_eq!(config.search_presets[0].name, "mine");
+        assert_eq!(config.search_presets[0].sprint, vec!["@current"]);
+        assert!(config.search_presets[0].epic.is_empty());
     }
 
     #[test]

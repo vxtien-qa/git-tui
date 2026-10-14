@@ -140,6 +140,102 @@ pub fn render_choice(f: &mut Frame, title: &str, message: &str, choices: &[(&str
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Render a one-line text prompt.
+pub fn render_text_prompt(f: &mut Frame, title: &str, message: &str, value: &str) {
+    let popup_w = (f.area().width.saturating_sub(4)).min(56);
+    let inner_w = popup_w.saturating_sub(4) as usize;
+
+    let mut lines = vec![Line::from("")];
+    for line in wrap_message(message, inner_w) {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", line),
+            theme::normal(),
+        )));
+    }
+    lines.push(Line::from(""));
+    // Keep the end of a long value (where the typing happens) in view.
+    let room = inner_w.saturating_sub(2);
+    let shown: String = {
+        let chars: Vec<char> = value.chars().collect();
+        let skip = chars.len().saturating_sub(room);
+        chars[skip..].iter().collect()
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{}{}", shown, theme::icon_cursor()),
+            theme::selected(),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  [Enter] ", theme::highlight()),
+        Span::styled("Save", theme::normal()),
+        Span::raw("    "),
+        Span::styled("[Esc] ", theme::dim()),
+        Span::styled("Cancel", theme::dim()),
+    ]));
+
+    let max_h = f.area().height.saturating_sub(2);
+    let height = (lines.len() as u16 + 2).min(max_h);
+    let area = centered_rect(popup_w, height, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::title())
+        .title(Span::styled(format!(" {} ", title), theme::title()));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Render a list to pick one entry from, with Enter / d / Esc hints.
+pub fn render_pick_list(f: &mut Frame, title: &str, entries: &[String], selected: usize) {
+    let popup_w = (f.area().width.saturating_sub(4)).min(56);
+    let inner_w = popup_w.saturating_sub(4) as usize;
+    // Rows that fit between the border, the blank lines and the footer.
+    let max_rows = (f.area().height.saturating_sub(8) as usize).max(1);
+    let skip = selected.saturating_sub(max_rows.saturating_sub(1));
+
+    let mut lines = vec![Line::from("")];
+    for (i, entry) in entries.iter().enumerate().skip(skip).take(max_rows) {
+        let is_sel = i == selected;
+        let marker = if is_sel { theme::icon_arrow() } else { " " };
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} {}",
+                marker,
+                super::utils::trunc(entry, inner_w.saturating_sub(3))
+            ),
+            if is_sel {
+                theme::selected()
+            } else {
+                theme::normal()
+            },
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(super::utils::footer_line(
+        &[("Enter", "Load"), ("d", "Delete"), ("Esc", "Close")],
+        inner_w + 2,
+    ));
+
+    let max_h = f.area().height.saturating_sub(2);
+    let height = (lines.len() as u16 + 2).min(max_h);
+    let area = centered_rect(popup_w, height, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::title())
+        .title(Span::styled(
+            format!(
+                " {}{}",
+                title,
+                super::utils::position_title(selected, entries.len())
+            ),
+            theme::title(),
+        ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 /// Render an error popup.
 pub fn render_error(f: &mut Frame, message: &str) {
     let popup_w = (f.area().width.saturating_sub(4)).min(70);

@@ -1298,6 +1298,13 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
         ConfirmAction::Quit => {
             app.running = false;
         }
+        ConfirmAction::DeleteSearchPreset(name) => {
+            app.config.search_presets.retain(|p| &p.name != name);
+            match app.config.save() {
+                Ok(()) => app.set_status(&format!("Deleted saved filter '{}'", name)),
+                Err(e) => app.popup = Popup::Error(format!("Failed to save config: {}", e)),
+            }
+        }
         ConfirmAction::DeleteStackLead(stack) => {
             app.config.stack_leads.remove(stack);
             if app.stack_lead_cursor > 0 {
