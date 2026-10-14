@@ -341,6 +341,7 @@ pub fn handle_detail(app: &mut App, key: KeyCode, item_idx: usize) {
                 None => app.set_status("This item has no parent"),
             }
         }
+        KeyCode::Char('d') => loader::spawn_deploy_check(app, item_idx),
         KeyCode::Char('y') => {
             if let Some(item) = app.items.get(item_idx) {
                 let md = crate::export::item_to_markdown(item, &app.config.owner);

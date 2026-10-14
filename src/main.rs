@@ -524,6 +524,39 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     app.list_selected = 0;
                     app.list_scroll = 0;
                 }
+                crate::app::ActionResult::DeployChecked {
+                    item_id,
+                    label,
+                    results,
+                } => {
+                    app.deploy_check_inflight.remove(&item_id);
+                    let failures: Vec<String> = results
+                        .iter()
+                        .flat_map(|(_, states)| states.iter())
+                        .filter_map(|(env, s)| match s {
+                            crate::gh::issue::DeployState::Failed(e) => {
+                                Some(format!("{}: {}", env, e))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    app.deploy_checks.extend(results);
+                    let summary = app
+                        .items
+                        .iter()
+                        .find(|i| i.id == item_id)
+                        .map(|i| app.deploy_summary(i))
+                        .unwrap_or_default();
+                    if failures.is_empty() {
+                        app.set_status(&format!("Deploy check {}: {}", label, summary));
+                    } else {
+                        app.popup = Popup::Error(format!(
+                            "Deploy check {} could not finish:\n{}",
+                            label,
+                            failures.join("\n")
+                        ));
+                    }
+                }
                 crate::app::ActionResult::ItemDetailFetched {
                     item_id,
                     body,
@@ -1289,6 +1322,49 @@ mod render_tests {
         }
     }
 
+    /// Item Detail with linked PRs and deploy results, at every size.
+    #[test]
+    fn detail_with_deploy_results_renders_at_every_size() {
+        use crate::gh::issue::DeployState;
+        for (w, h) in [(40u16, 8u16), (60, 10), (80, 24), (100, 30), (200, 60)] {
+            let mut app = app_with_items();
+            app.items[2].linked_prs = (0..3)
+                .map(|n| crate::models::item::LinkedPr {
+                    repo: "Org/a-repository-with-a-long-name".into(),
+                    number: 2100 + n,
+                    title:
+                        "A pull request title long enough to need truncating on a narrow terminal"
+                            .into(),
+                    url: format!("https://github.com/Org/repo/pull/{}", 2100 + n),
+                    state: if n == 2 {
+                        "OPEN".into()
+                    } else {
+                        "MERGED".into()
+                    },
+                    merge_commit: Some("abc".into()),
+                    base_ref: "develop".into(),
+                })
+                .collect();
+            let id = app.items[2].id.clone();
+            app.linked_prs_loaded.insert(id.clone());
+            app.deploy_checks.insert(
+                "https://github.com/Org/repo/pull/2100".into(),
+                vec![
+                    ("Dev".into(), DeployState::Contained),
+                    ("STG".into(), DeployState::Unknown),
+                    ("UAT".into(), DeployState::Missing),
+                    ("Prod".into(), DeployState::Failed("boom".into())),
+                ],
+            );
+            app.deploy_check_inflight.insert(id);
+            app.screen = Screen::ItemDetail(2);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+            terminal
+                .draw(|f| draw(f, &mut app))
+                .unwrap_or_else(|e| panic!("detail at {}x{} failed: {}", w, h, e));
+        }
+    }
+
     /// Popups sit on top of every screen, so they get the same treatment.
     #[test]
     fn every_popup_renders_at_every_size() {
@@ -1439,6 +1515,25 @@ mod snapshot_tool {
                     crate::gh::issue::linked_prs(&repo, number).expect("linked PRs");
                 let id = app.items[idx].id.clone();
                 app.linked_prs_loaded.insert(id);
+                // Run the deploy check inline, as the worker would.
+                if std::env::var("SNAP_DEPLOY").is_ok() {
+                    let branches = app.config.deploy_branches.clone();
+                    for pr in app.items[idx].linked_prs.clone() {
+                        let Some(sha) = pr.merge_commit.clone() else {
+                            continue;
+                        };
+                        let states = branches
+                            .iter()
+                            .map(|b| {
+                                (
+                                    b.env.clone(),
+                                    crate::gh::issue::deploy_state(&pr.repo, &b.branch, &sha),
+                                )
+                            })
+                            .collect();
+                        app.deploy_checks.insert(pr.url.clone(), states);
+                    }
+                }
                 app.screen = Screen::ItemDetail(idx);
             }
             "search-copy" => {

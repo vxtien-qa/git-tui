@@ -8,6 +8,18 @@ use super::utils::{trunc, word_wrap};
 use crate::app::App;
 use crate::models::item::MediaType;
 
+/// Mark and style for one deploy check cell.
+fn deploy_mark(state: &crate::gh::issue::DeployState) -> (String, ratatui::style::Style) {
+    use crate::gh::issue::DeployState;
+    match state {
+        DeployState::Contained => (theme::icon_ok().to_string(), theme::success()),
+        DeployState::Missing => (theme::icon_fail().to_string(), theme::error()),
+        DeployState::Unknown => ("?".to_string(), theme::warning()),
+        DeployState::NoBranch => ("-".to_string(), theme::dim()),
+        DeployState::Failed(_) => ("!".to_string(), theme::error()),
+    }
+}
+
 /// Render the full item detail screen.
 pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
     let item = match app.items.get(item_idx) {
@@ -113,6 +125,43 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
             ]));
             lines.push(Line::from(Span::styled(
                 format!("    {}", super::utils::trunc(&pr.title, text_w)),
+                theme::dim(),
+            )));
+            if let Some(states) = app.deploy_checks.get(&pr.url) {
+                let mut spans = vec![Span::raw("    ")];
+                for (env, state) in states {
+                    let (mark, style) = deploy_mark(state);
+                    spans.push(Span::styled(format!("{} ", env), theme::dim()));
+                    spans.push(Span::styled(mark, style));
+                    spans.push(Span::raw("  "));
+                }
+                lines.push(Line::from(spans));
+            } else if pr.is_merged() && app.deploy_check_inflight.contains(&item.id) {
+                lines.push(Line::from(Span::styled(
+                    format!("    {} checking branches...", theme::icon_spinner()),
+                    theme::dim(),
+                )));
+            }
+        }
+        if item
+            .linked_prs
+            .iter()
+            .any(|pr| app.deploy_checks.contains_key(&pr.url))
+        {
+            let legend = format!(
+                "{} in branch · {} not in branch · ? not in its history (maybe cherry-picked) · - no such branch",
+                theme::icon_ok(),
+                theme::icon_fail()
+            );
+            for part in super::utils::word_wrap(&legend, text_w + 4) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", part),
+                    theme::dim(),
+                )));
+            }
+        } else if item.linked_prs.iter().any(|pr| pr.is_merged()) {
+            lines.push(Line::from(Span::styled(
+                "  d: check which branches have these PRs",
                 theme::dim(),
             )));
         }
@@ -224,6 +273,7 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
     let footer = super::utils::footer_line(
         &[
             ("p", "QA menu"),
+            ("d", "Deploy check"),
             ("c", "Comment"),
             ("e", "Enhancement"),
             ("m", "Move"),

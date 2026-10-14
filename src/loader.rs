@@ -504,6 +504,89 @@ pub fn fetch_item_detail(app: &mut App, item_idx: usize) {
     spawn_detail_fetch_action(app.action_tx.clone(), item_id, number, repo, false);
 }
 
+/// Check where a ticket's merged PRs are deployed (`d` in Item Detail).
+///
+/// For each merged PR and each `config.deploy_branches` entry, GitHub's
+/// compare API says whether the branch contains the PR's merge commit. Runs
+/// on worker threads, one per PR; the result lands as `DeployChecked`.
+pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
+    let Some(item) = app.items.get(item_idx) else {
+        return;
+    };
+    let label = item
+        .number
+        .map(|n| format!("#{}", n))
+        .unwrap_or_else(|| "this ticket".to_string());
+    if !app.linked_prs_loaded.contains(&item.id) {
+        app.set_status("Linked PRs are still loading - try again in a moment");
+        return;
+    }
+    if item.linked_prs.is_empty() {
+        app.set_status(&format!(
+            "{} has no PRs linked on GitHub - nothing to check",
+            label
+        ));
+        return;
+    }
+    let prs: Vec<crate::models::item::LinkedPr> = item
+        .linked_prs
+        .iter()
+        .filter(|p| p.is_merged() && p.merge_commit.is_some())
+        .cloned()
+        .collect();
+    if prs.is_empty() {
+        app.set_status(&format!(
+            "{}: no linked PR is merged yet - nothing can be deployed",
+            label
+        ));
+        return;
+    }
+    if !app.deploy_check_inflight.insert(item.id.clone()) {
+        app.set_status("Deploy check already running");
+        return;
+    }
+    let item_id = item.id.clone();
+    let branches = app.config.deploy_branches.clone();
+    app.set_status(&format!(
+        "Checking {} merged PR(s) against {}...",
+        prs.len(),
+        branches
+            .iter()
+            .map(|b| b.branch.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+
+    let tx = app.action_tx.clone();
+    std::thread::spawn(move || {
+        let workers: Vec<_> = prs
+            .into_iter()
+            .map(|pr| {
+                let branches = branches.clone();
+                std::thread::spawn(move || {
+                    let sha = pr.merge_commit.clone().unwrap_or_default();
+                    let states = branches
+                        .iter()
+                        .map(|b| {
+                            (
+                                b.env.clone(),
+                                gh::issue::deploy_state(&pr.repo, &b.branch, &sha),
+                            )
+                        })
+                        .collect();
+                    (pr.url, states)
+                })
+            })
+            .collect();
+        let results = workers.into_iter().filter_map(|w| w.join().ok()).collect();
+        let _ = tx.send(crate::app::ActionResult::DeployChecked {
+            item_id,
+            label,
+            results,
+        });
+    });
+}
+
 /// Force-fetch item details using `action_rx` - never blocked by bg refresh.
 /// Used by Shift+R reload.
 pub fn force_fetch_item_detail(app: &mut App, item_idx: usize) {

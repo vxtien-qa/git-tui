@@ -266,6 +266,12 @@ pub enum ActionResult {
         /// `None` when the lookup failed, so a failure keeps what was shown.
         linked_prs: Option<Vec<crate::models::item::LinkedPr>>,
     },
+    /// Deploy check results for one ticket's merged PRs, by PR URL.
+    DeployChecked {
+        item_id: String,
+        label: String,
+        results: Vec<(String, Vec<(String, crate::gh::issue::DeployState)>)>,
+    },
 }
 
 /// The entire app state.
@@ -447,6 +453,12 @@ pub struct App {
     /// Items whose linked PRs have been looked up this session, so an empty
     /// list reads as "none linked" rather than "not loaded yet".
     pub linked_prs_loaded: std::collections::HashSet<String>,
+    /// Deploy check results by PR URL: (environment, state) in
+    /// `config.deploy_branches` order. Kept for the session, across syncs.
+    pub deploy_checks:
+        std::collections::HashMap<String, Vec<(String, crate::gh::issue::DeployState)>>,
+    /// Item IDs with a deploy check running.
+    pub deploy_check_inflight: std::collections::HashSet<String>,
 }
 
 impl Default for App {
@@ -566,6 +578,8 @@ impl App {
             running: true,
             detail_fetch_inflight: std::collections::HashSet::new(),
             linked_prs_loaded: std::collections::HashSet::new(),
+            deploy_checks: std::collections::HashMap::new(),
+            deploy_check_inflight: std::collections::HashSet::new(),
         }
     }
 
@@ -691,6 +705,36 @@ impl App {
     /// Search filter rows below the keyword box: Status, Priority, Stack,
     /// Sprint, Label, EPIC, Assignee.
     pub const SEARCH_FILTER_ROWS: usize = 7;
+
+    /// One line on where a ticket's merged PRs are, for the status bar:
+    /// `#4019 UAT: 2/2 in · Prod: 1/2 in, 1 ?`. Empty when nothing was checked.
+    pub fn deploy_summary(&self, item: &crate::models::item::Item) -> String {
+        use crate::gh::issue::DeployState;
+        let checked: Vec<&Vec<(String, DeployState)>> = item
+            .linked_prs
+            .iter()
+            .filter_map(|pr| self.deploy_checks.get(&pr.url))
+            .collect();
+        if checked.is_empty() {
+            return String::new();
+        }
+        let mut parts = Vec::new();
+        for (i, db) in self.config.deploy_branches.iter().enumerate() {
+            let states: Vec<&DeployState> = checked
+                .iter()
+                .filter_map(|r| r.get(i).map(|(_, s)| s))
+                .collect();
+            let count = |want: fn(&DeployState) -> bool| states.iter().filter(|s| want(s)).count();
+            let inn = count(|s| *s == DeployState::Contained);
+            let unknown = count(|s| *s == DeployState::Unknown);
+            let mut part = format!("{}: {}/{} in", db.env, inn, states.len());
+            if unknown > 0 {
+                part.push_str(&format!(", {} ?", unknown));
+            }
+            parts.push(part);
+        }
+        parts.join(" · ")
+    }
 
     /// Assignee filter value for a ticket nobody is assigned to.
     pub const NO_ASSIGNEE: &'static str = "(none)";
@@ -2015,6 +2059,46 @@ mod tests {
             .map(|p| (p.name.as_str(), p.query.as_str()))
             .collect();
         assert_eq!(names, vec![("a", "three"), ("b", "two")]);
+    }
+
+    #[test]
+    fn test_deploy_summary_counts_per_environment() {
+        use crate::gh::issue::DeployState::*;
+        use crate::models::item::LinkedPr;
+        let mut app = App::new();
+        app.config.deploy_branches = crate::config::Config::default().deploy_branches;
+        let pr = |n: u32| LinkedPr {
+            repo: "org/api".into(),
+            number: n,
+            url: format!("u{}", n),
+            state: "MERGED".into(),
+            ..Default::default()
+        };
+        let item = Item {
+            number: Some(4019),
+            linked_prs: vec![pr(1), pr(2), pr(3)],
+            ..Default::default()
+        };
+        assert_eq!(app.deploy_summary(&item), "");
+
+        let env = |states: [crate::gh::issue::DeployState; 4]| {
+            ["Dev", "STG", "UAT", "Prod"]
+                .iter()
+                .map(|e| e.to_string())
+                .zip(states)
+                .collect::<Vec<_>>()
+        };
+        app.deploy_checks.insert(
+            "u1".into(),
+            env([Contained, Contained, Contained, Contained]),
+        );
+        app.deploy_checks
+            .insert("u2".into(), env([Contained, Unknown, Unknown, Missing]));
+        // u3 not checked: left out of the counts.
+        assert_eq!(
+            app.deploy_summary(&item),
+            "Dev: 2/2 in · STG: 1/2 in, 1 ? · UAT: 1/2 in, 1 ? · Prod: 1/2 in"
+        );
     }
 
     #[test]

@@ -190,6 +190,52 @@ pub fn parse_linked_prs(json: &str) -> Result<Vec<LinkedPr>> {
     Ok(prs)
 }
 
+/// Whether `sha` is on `branch` of `repo`, as GitHub's compare API sees it.
+pub fn deploy_state(repo: &str, branch: &str, sha: &str) -> DeployState {
+    // per_page=1: only `status` is read, so skip the commit list.
+    let endpoint = format!("repos/{}/compare/{}...{}?per_page=1", repo, branch, sha);
+    match client::exec(&["api", &endpoint, "--jq", ".status"]) {
+        Ok(status) => DeployState::from_compare_status(status.trim()),
+        Err(e) => DeployState::from_error(&e.to_string()),
+    }
+}
+
+/// Where a merged PR's commit stands against one environment branch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeployState {
+    /// `identical` or `behind`: the branch contains the commit.
+    Contained,
+    /// `ahead`: the branch is an ancestor of the commit, so it lacks it.
+    Missing,
+    /// `diverged`: the commit is not in the branch's history, but the change
+    /// may have arrived another way, such as a cherry-pick onto a deploy
+    /// branch. Never reported as "not deployed".
+    Unknown,
+    /// The repository has no such branch (404).
+    NoBranch,
+    /// The check itself failed.
+    Failed(String),
+}
+
+impl DeployState {
+    pub fn from_compare_status(status: &str) -> Self {
+        match status {
+            "identical" | "behind" => DeployState::Contained,
+            "ahead" => DeployState::Missing,
+            "diverged" => DeployState::Unknown,
+            other => DeployState::Failed(format!("unexpected compare status '{}'", other)),
+        }
+    }
+
+    fn from_error(message: &str) -> Self {
+        if message.contains("HTTP 404") || message.contains("Not Found") {
+            DeployState::NoBranch
+        } else {
+            DeployState::Failed(message.lines().last().unwrap_or(message).to_string())
+        }
+    }
+}
+
 /// The issue's own GraphQL node ID (`I_kw...`).
 ///
 /// Mutations that take an Issue (`updateIssue`, `addSubIssue`) need this, NOT
@@ -329,6 +375,42 @@ mod tests {
         assert_eq!(prs[0].merge_commit.as_deref(), Some("745f7db2"));
         assert_eq!(prs[2].merge_commit, None);
         assert_eq!(prs[2].base_ref, "uat");
+    }
+
+    #[test]
+    fn test_deploy_state_from_compare_status() {
+        assert_eq!(
+            DeployState::from_compare_status("identical"),
+            DeployState::Contained
+        );
+        assert_eq!(
+            DeployState::from_compare_status("behind"),
+            DeployState::Contained
+        );
+        assert_eq!(
+            DeployState::from_compare_status("ahead"),
+            DeployState::Missing
+        );
+        // Not in the branch's history, but maybe cherry-picked: unknown,
+        // never "not deployed".
+        assert_eq!(
+            DeployState::from_compare_status("diverged"),
+            DeployState::Unknown
+        );
+        assert!(matches!(
+            DeployState::from_compare_status("weird"),
+            DeployState::Failed(_)
+        ));
+        assert_eq!(
+            DeployState::from_error(
+                "gh api repos/x/compare/nope...abc failed: gh: Not Found (HTTP 404)"
+            ),
+            DeployState::NoBranch
+        );
+        assert!(matches!(
+            DeployState::from_error("gh: API rate limit exceeded (HTTP 403)"),
+            DeployState::Failed(_)
+        ));
     }
 
     #[test]

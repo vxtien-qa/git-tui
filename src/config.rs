@@ -126,6 +126,33 @@ pub struct SlackUserMapping {
     pub slack_display: String,
 }
 
+/// One environment the deploy check looks for a PR in, and its branch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeployBranch {
+    /// Short label shown in Item Detail, e.g. `UAT`.
+    pub env: String,
+    /// Branch that environment deploys from, e.g. `uat`.
+    pub branch: String,
+}
+
+/// Dev, STG, UAT, Prod: the branches every Kinatico code repository has
+/// (checked 2026-10-14 on be-compliance-api, marvelx-web,
+/// be-event-handler-service, marvelx-web-shared-ui and marvelx-mobile).
+fn default_deploy_branches() -> Vec<DeployBranch> {
+    [
+        ("Dev", "develop"),
+        ("STG", "staging"),
+        ("UAT", "uat"),
+        ("Prod", "production"),
+    ]
+    .into_iter()
+    .map(|(env, branch)| DeployBranch {
+        env: env.to_string(),
+        branch: branch.to_string(),
+    })
+    .collect()
+}
+
 /// A saved Search: the keyword and every filter row, under a name.
 ///
 /// Filter values are stored the way the rows store them (`!` prefix for an
@@ -192,6 +219,9 @@ pub struct Config {
     /// Saved Search filters, in the order they were first saved.
     #[serde(default)]
     pub search_presets: Vec<SearchPreset>,
+    /// Environments the deploy check (`d` in Item Detail) compares PRs with.
+    #[serde(default = "default_deploy_branches")]
+    pub deploy_branches: Vec<DeployBranch>,
 }
 
 fn default_timezone() -> i32 {
@@ -225,6 +255,7 @@ impl Default for Config {
             slack_user_map: HashMap::new(),
             stack_leads: default_stack_leads(),
             search_presets: Vec::new(),
+            deploy_branches: default_deploy_branches(),
         }
     }
 }
@@ -352,6 +383,13 @@ mod tests {
         assert_eq!(config.search_presets[0].name, "mine");
         assert_eq!(config.search_presets[0].sprint, vec!["@current"]);
         assert!(config.search_presets[0].epic.is_empty());
+        // Deploy branches default for configs that don't name them.
+        let branches: Vec<&str> = config
+            .deploy_branches
+            .iter()
+            .map(|b| b.branch.as_str())
+            .collect();
+        assert_eq!(branches, vec!["develop", "staging", "uat", "production"]);
     }
 
     #[test]

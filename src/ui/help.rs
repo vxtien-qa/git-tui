@@ -91,6 +91,10 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
             "e",
             "Enhancement request (labels Enhancement + Task, issue type Task)",
         ),
+        key_line(
+            "d",
+            "Deploy check: are the linked PRs on develop/staging/uat/production",
+        ),
         key_line("h", "View history"),
         key_line("m", "Move item"),
         key_line("o", "Open parent issue (sub-issues)"),
