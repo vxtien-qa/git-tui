@@ -326,8 +326,8 @@ pub struct App {
     pub bug_impact: String,
     pub bug_evidence: String,
     pub bug_security: String,
-    pub bug_priority_idx: usize,    // 0=P0..4=P4
-    pub bug_stack_idx: usize,       // 0=FE, 1=BE, 2=App UI, 3=App BE
+    pub bug_priority_idx: usize,    // 0=--, 1=P0..5=P4
+    pub bug_stack_idx: usize,       // 0=--, 1=FE, 2=BE, 3=App UI, 4=App BE
     pub bug_env_idx: usize,         // index into App::BUG_ENVS
     pub bug_broken_idx: usize,      // 0=Completely, 1=Partially
     pub bug_visible_idx: usize,     // 0=Yes, 1=No
@@ -487,9 +487,11 @@ impl App {
             bug_impact: String::new(),
             bug_evidence: String::new(),
             bug_security: String::new(),
-            bug_priority_idx: 2, // default P2
-            bug_stack_idx: 1,    // default BE
-            bug_env_idx: 1,      // default STG
+            // `--` by default: GitHub's priority automation scores an unset
+            // Priority from the scoring answers, and the QA picks the Stack.
+            bug_priority_idx: 0,
+            bug_stack_idx: 0,
+            bug_env_idx: 1, // default STG
             bug_broken_idx: 0,
             bug_visible_idx: 0,
             bug_workaround_idx: 2, // default No Workaround
@@ -1092,8 +1094,8 @@ impl App {
         self.bug_visible_idx = 0;
         self.bug_workaround_idx = 2;
         self.bug_impact_prio_idx = 0;
-        self.bug_priority_idx = 2; // default P2
-        self.bug_stack_idx = 1; // default BE
+        self.bug_priority_idx = 0; // --
+        self.bug_stack_idx = 0; // --
         self.bug_assignees.clear();
         self.bug_kind = ReportKind::Bug;
     }
@@ -1725,6 +1727,22 @@ mod tests {
         // The form defaults to Bug, and clearing it returns to Bug so the next
         // report cannot inherit the previous kind.
         assert_eq!(ReportKind::default(), ReportKind::Bug);
+    }
+
+    #[test]
+    fn test_bug_form_defaults_leave_priority_and_stack_unset() {
+        // Index 0 is `--` in both selectors (ui::bug_report PRIORITIES and
+        // STACKS). The old defaults 2 and 1 were written as "P2" and "BE"
+        // before `--` was added in front, and silently became P1 and FE.
+        let mut app = App::new();
+        assert_eq!(app.bug_priority_idx, 0);
+        assert_eq!(app.bug_stack_idx, 0);
+
+        app.bug_priority_idx = 3;
+        app.bug_stack_idx = 2;
+        app.clear_bug_form();
+        assert_eq!(app.bug_priority_idx, 0);
+        assert_eq!(app.bug_stack_idx, 0);
     }
 
     #[test]

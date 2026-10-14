@@ -681,7 +681,11 @@ pub fn handle_bug_report(
             }
 
             let priorities = ["--", "P0", "P1", "P2", "P3", "P4"];
-            let prio = priorities[app.bug_priority_idx];
+            // `--` is the default now: GitHub's automation scores it.
+            let prio = match priorities[app.bug_priority_idx] {
+                "--" => "priority: auto",
+                p => p,
+            };
             // The Fail flow does more than create a bug - say so up front.
             let kind = app.bug_kind;
             let headline = format!(
