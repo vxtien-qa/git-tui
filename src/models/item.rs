@@ -3,6 +3,35 @@ use serde::{Deserialize, Serialize};
 
 use super::status::Status;
 
+/// A pull request linked to an issue: one that closes it ("Fixes #n"), one
+/// that mentions it, or one linked by hand in the Development panel.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct LinkedPr {
+    /// `owner/name` of the PR's repository.
+    pub repo: String,
+    pub number: u32,
+    pub title: String,
+    pub url: String,
+    /// GitHub's state: `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+    /// The commit the merge produced, for merged PRs.
+    pub merge_commit: Option<String>,
+    /// The branch the PR targets.
+    pub base_ref: String,
+}
+
+impl LinkedPr {
+    /// `repo#number` without the owner, for display.
+    pub fn short_ref(&self) -> String {
+        let name = self.repo.rsplit('/').next().unwrap_or(&self.repo);
+        format!("{}#{}", name, self.number)
+    }
+
+    pub fn is_merged(&self) -> bool {
+        self.state.eq_ignore_ascii_case("MERGED")
+    }
+}
+
 /// A project board item (issue or draft).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Item {
@@ -36,8 +65,9 @@ pub struct Item {
     pub body: Option<String>,
     /// Comments
     pub comments: Vec<Comment>,
-    /// Linked PR URLs
-    pub linked_prs: Vec<String>,
+    /// Pull requests linked to the issue, loaded with its detail.
+    #[serde(default)]
+    pub linked_prs: Vec<LinkedPr>,
     /// Created timestamp
     pub created_at: Option<DateTime<Utc>>,
     /// Updated timestamp (from GitHub API)
@@ -243,11 +273,17 @@ mod tests {
         item.linked_prs = vec![];
         assert_eq!(item.pr_display(), "--");
 
-        item.linked_prs = vec!["https://github.com/repo/pull/123".to_string()];
+        let pr = |n: u32| LinkedPr {
+            repo: "org/repo".into(),
+            number: n,
+            url: format!("https://github.com/org/repo/pull/{}", n),
+            ..Default::default()
+        };
+        item.linked_prs = vec![pr(123)];
         assert_eq!(item.pr_display(), "1 PR");
 
-        item.linked_prs
-            .push("https://github.com/repo/pull/456".to_string());
+        item.linked_prs.push(pr(456));
         assert_eq!(item.pr_display(), "2 PRs");
+        assert_eq!(item.linked_prs[1].short_ref(), "repo#456");
     }
 }

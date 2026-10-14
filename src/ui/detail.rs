@@ -78,25 +78,43 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
     }
 
     // ─── Linked PRs ───
+    if item.linked_prs.is_empty() && app.linked_prs_loaded.contains(&item.id) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  -- Linked PRs: none linked on GitHub --",
+            theme::dim(),
+        )));
+    }
     if !item.linked_prs.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  -- Linked PRs ({}) --", item.linked_prs.len()),
             theme::title(),
         )));
-        let url_width = (area.width.saturating_sub(8) as usize).max(20);
-        for pr_url in &item.linked_prs {
-            // Long PR URLs wrap instead of being clipped off-screen.
-            for (i, part) in super::utils::word_wrap(pr_url, url_width)
-                .into_iter()
-                .enumerate()
-            {
-                let prefix = if i == 0 { theme::icon_arrow() } else { " " };
-                lines.push(Line::from(Span::styled(
-                    format!("  {} {}", prefix, part),
-                    theme::normal(),
-                )));
-            }
+        let text_w = (area.width.saturating_sub(10) as usize).max(20);
+        for pr in &item.linked_prs {
+            // `be-compliance-api#2103  merged -> develop`, then the title.
+            let state_style = if pr.is_merged() {
+                theme::success()
+            } else if pr.state.eq_ignore_ascii_case("OPEN") {
+                theme::warning()
+            } else {
+                theme::dim()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", theme::icon_arrow()), theme::normal()),
+                Span::styled(pr.short_ref(), theme::highlight()),
+                Span::raw("  "),
+                Span::styled(pr.state.to_lowercase(), state_style),
+                Span::styled(
+                    format!(" {} {}", theme::icon_right_arrow(), pr.base_ref),
+                    theme::dim(),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                format!("    {}", super::utils::trunc(&pr.title, text_w)),
+                theme::dim(),
+            )));
         }
     }
 

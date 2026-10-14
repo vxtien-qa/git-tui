@@ -274,6 +274,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                                     }
                                 }
                             }
+                            // Linked PRs load with a ticket's detail, not with
+                            // the sync - carry them over or every auto-sync
+                            // would blank the PR list of the ticket on screen.
+                            for item in &mut app.items {
+                                if item.linked_prs.is_empty() {
+                                    if let Some(old) = old_items
+                                        .iter()
+                                        .find(|o| o.id == item.id && !o.linked_prs.is_empty())
+                                    {
+                                        item.linked_prs = old.linked_prs.clone();
+                                    }
+                                }
+                            }
                             handlers::helpers::remap_screen_indices(app, &old_items);
                             // Cache writes happen in the refresh worker thread -
                             // serializing 1000+ items inline here caused a
@@ -517,6 +530,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     comments,
                     labels,
                     created_at,
+                    linked_prs,
                 } => {
                     app.detail_fetch_inflight.remove(&item_id);
                     if let Some(item) = app.items.iter_mut().find(|i| i.id == item_id) {
@@ -529,6 +543,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         item.labels = labels;
                         if created_at.is_some() {
                             item.created_at = created_at;
+                        }
+                        if let Some(prs) = linked_prs {
+                            item.linked_prs = prs;
+                            app.linked_prs_loaded.insert(item_id.clone());
                         }
                         app.set_status(&format!(
                             "Loaded: {} comment{}",
@@ -1406,6 +1424,23 @@ mod snapshot_tool {
                     name: "In QA mine".into(),
                 };
             }
+            // `detail-4019`: a ticket with its linked PRs, read live from
+            // GitHub (read-only).
+            n if n.starts_with("detail-") => {
+                let number: u32 = n["detail-".len()..].parse().expect("detail-<number>");
+                let Some(idx) = app.items.iter().position(|i| {
+                    i.number == Some(number)
+                        && i.repository.as_deref() == Some(&app.config.bug_repo)
+                }) else {
+                    return false;
+                };
+                let repo = app.items[idx].repository.clone().unwrap_or_default();
+                app.items[idx].linked_prs =
+                    crate::gh::issue::linked_prs(&repo, number).expect("linked PRs");
+                let id = app.items[idx].id.clone();
+                app.linked_prs_loaded.insert(id);
+                app.screen = Screen::ItemDetail(idx);
+            }
             "search-copy" => {
                 app.screen = Screen::Search;
                 app.filter_status = vec!["In QA".to_string()];
@@ -1418,8 +1453,8 @@ mod snapshot_tool {
     }
 
     /// Render screens over the real board from the local cache, for reviewing
-    /// a layout against real titles, epics and assignees. Read-only: it never
-    /// calls GitHub.
+    /// a layout against real titles, epics and assignees. Read-only: only the
+    /// `detail-<n>` scenarios call GitHub, and only to read.
     ///
     /// `SNAP=search,search-epic cargo test snapshot_live -- --ignored --nocapture`
     #[test]

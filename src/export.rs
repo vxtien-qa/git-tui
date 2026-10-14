@@ -2131,8 +2131,15 @@ pub fn item_to_markdown(item: &Item, owner: &str) -> String {
     // Linked PRs
     if !item.linked_prs.is_empty() {
         r.push_str(&format!("\n### Linked PRs ({})\n", item.linked_prs.len()));
-        for pr_url in &item.linked_prs {
-            r.push_str(&format!("- {}\n", pr_url));
+        for pr in &item.linked_prs {
+            r.push_str(&format!(
+                "- [{}]({}) {} -> {}: {}\n",
+                pr.short_ref(),
+                pr.url,
+                pr.state.to_lowercase(),
+                pr.base_ref,
+                clean_title(&pr.title)
+            ));
         }
     }
 

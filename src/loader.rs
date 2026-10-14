@@ -581,6 +581,9 @@ fn spawn_detail_fetch_action(
 ) {
     std::thread::spawn(move || {
         let (body, comments, labels, created_at) = do_fetch_detail(number, &repo);
+        // Fails for a PR on the board (it is not an issue) - that just means
+        // no linked PRs to show.
+        let linked_prs = gh::issue::linked_prs(&repo, number).ok();
 
         if refresh_status {
             if let Ok(Some(remote)) = gh::item::get_item_status(&item_id) {
@@ -597,6 +600,7 @@ fn spawn_detail_fetch_action(
             comments,
             labels,
             created_at,
+            linked_prs,
         });
     });
 }

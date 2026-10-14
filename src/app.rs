@@ -263,6 +263,8 @@ pub enum ActionResult {
         comments: Vec<crate::models::item::Comment>,
         labels: Vec<String>,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
+        /// `None` when the lookup failed, so a failure keeps what was shown.
+        linked_prs: Option<Vec<crate::models::item::LinkedPr>>,
     },
 }
 
@@ -442,6 +444,9 @@ pub struct App {
     /// a time. Keyed by ID, so a refresh reordering `items` cannot make the
     /// result land on the wrong ticket.
     pub detail_fetch_inflight: std::collections::HashSet<String>,
+    /// Items whose linked PRs have been looked up this session, so an empty
+    /// list reads as "none linked" rather than "not loaded yet".
+    pub linked_prs_loaded: std::collections::HashSet<String>,
 }
 
 impl Default for App {
@@ -560,6 +565,7 @@ impl App {
             last_refresh_attempt: None,
             running: true,
             detail_fetch_inflight: std::collections::HashSet::new(),
+            linked_prs_loaded: std::collections::HashSet::new(),
         }
     }
 
