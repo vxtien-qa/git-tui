@@ -1569,14 +1569,19 @@ mod render_tests {
         }
         app.screen = Screen::Dashboard;
         let rows = screen_rows(&mut app, 120, 60);
-        // A breakdown row reads `   Done ███░ 1` inside the panel's borders.
+        // A breakdown row reads `   Done ███░ 1` inside the panel's borders,
+        // or `Done ###- 1` where the terminal has no Unicode (Windows CI).
+        let bar_start = [
+            format!(" {}", ui::theme::icon_bar_full()),
+            format!(" {}", ui::theme::icon_bar_empty()),
+        ];
         let count_of = |label: &str| -> Option<String> {
             rows.iter()
                 .flat_map(|r| r.split('│'))
                 .map(str::trim)
                 .find(|seg| {
                     seg.strip_prefix(label)
-                        .is_some_and(|rest| rest.starts_with(" █") || rest.starts_with(" ░"))
+                        .is_some_and(|rest| bar_start.iter().any(|b| rest.starts_with(b.as_str())))
                 })
                 .and_then(|seg| seg.split_whitespace().last().map(str::to_string))
         };
