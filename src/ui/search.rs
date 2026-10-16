@@ -285,11 +285,25 @@ fn build_filter_lines(app: &App, max_w: usize) -> (Vec<Line<'static>>, usize) {
             continue;
         }
 
-        // Focused: show label
+        // Focused: show label, and where the cursor is among the options -
+        // a long list (EPIC, Assignee) scrolls, so it says how many there are.
+        let position = if options.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  {}/{}",
+                (app.filter_cursor[*cursor_field] + 1).min(options.len()),
+                options.len()
+            )
+        };
         lines.push(Line::from(vec![
             Span::styled(format!(" {} {} ", icon, label), theme::highlight()),
             Span::styled(
-                format!("({} move, Space toggle)", theme::icon_left_right()),
+                format!(
+                    "({} move, Space toggle){}",
+                    theme::icon_left_right(),
+                    position
+                ),
                 theme::dim(),
             ),
         ]));

@@ -77,6 +77,9 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|i| i.status == Status::ReadyForRelease)
         .count();
+    // The Done column on its own: `done` also holds Tech Complete and Ready
+    // for Release, which have their own rows in the breakdown.
+    let done_column = items.iter().filter(|i| i.status == Status::Done).count();
     let done_pct = utils::percent(done, total);
 
     // Section rules span the panel: capping them at 55 columns left a ragged
@@ -171,7 +174,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         ("In UAT", in_uat),
         ("Tech Complete", tech_complete),
         ("Ready for Release", ready_release),
-        ("Done", done),
+        ("Done", done_column),
         ("Blocked", blocked),
     ];
 

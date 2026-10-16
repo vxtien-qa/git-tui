@@ -125,6 +125,27 @@ pub fn exec(args: &[&str]) -> Result<String> {
     Ok(stdout)
 }
 
+/// The part of a `gh` failure a person can act on: what gh printed, without
+/// the command line `exec` and `api` echo in front of it. That echo can be a
+/// whole GraphQL query, which pushed the reason off a popup.
+pub fn gh_reason(message: &str) -> String {
+    let reason = match message.split_once(" failed: ") {
+        Some((command, rest)) if command.starts_with("gh ") => rest,
+        _ => message,
+    };
+    let reason = reason
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if reason.is_empty() {
+        "gh failed without saying why".to_string()
+    } else {
+        reason
+    }
+}
+
 /// Execute a `gh` CLI command and parse JSON output.
 pub fn exec_json<T: serde::de::DeserializeOwned>(args: &[&str]) -> Result<T> {
     let stdout = exec(args)?;
@@ -168,4 +189,31 @@ pub fn version() -> Result<String> {
     // Output: "gh version 2.87.2 (2026-02-10)\n..."
     let version = output.lines().next().unwrap_or("").trim().to_string();
     Ok(version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gh_reason_drops_the_echoed_command() {
+        let long = "gh api graphql -f query= query($owner: String!) {\n  repository(owner: $owner) { id }\n} failed: HTTP 502: Bad Gateway (https://api.github.com/graphql)";
+        assert_eq!(
+            gh_reason(long),
+            "HTTP 502: Bad Gateway (https://api.github.com/graphql)"
+        );
+        assert_eq!(
+            gh_reason("gh api repos/o/r/compare/uat...abc --jq .status failed: error connecting to api.github.com\ncheck your internet connection"),
+            "error connecting to api.github.com / check your internet connection"
+        );
+        // Not a gh echo: kept whole.
+        assert_eq!(
+            gh_reason("Failed to run gh CLI. Is it installed?"),
+            "Failed to run gh CLI. Is it installed?"
+        );
+        assert_eq!(
+            gh_reason("gh issue view 1 failed: "),
+            "gh failed without saying why"
+        );
+    }
 }

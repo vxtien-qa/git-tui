@@ -182,6 +182,9 @@ pub enum Popup {
     ConfirmSprint {
         title: String,
         message: String,
+        /// Names the ticket the sprint applies to: on Fail it is the parent,
+        /// not the bug being filed.
+        sprint_label: String,
         choices: Vec<SprintChoice>,
         selected: usize,
         on_confirm: ConfirmAction,
@@ -813,13 +816,20 @@ impl App {
         &mut self,
         kind: BatchKind,
         candidates: &[usize],
+        from: usize,
         checked: impl Fn(usize) -> bool,
     ) {
         self.batch_rows = candidates
             .iter()
             .filter_map(|&i| self.items.get(i).map(|it| (it.id.clone(), checked(i))))
             .collect();
-        self.batch_cursor = 0;
+        // The cursor starts on the ticket the list was opened from.
+        let from_id = self.items.get(from).map(|it| it.id.clone());
+        self.batch_cursor = self
+            .batch_rows
+            .iter()
+            .position(|(id, _)| Some(id) == from_id.as_ref())
+            .unwrap_or(0);
         self.goto(Screen::BatchPicker(kind));
     }
 
@@ -1416,6 +1426,19 @@ impl App {
     pub fn set_status(&mut self, msg: &str) {
         self.status_message = Some(msg.to_string());
         self.status_message_at = Some(std::time::Instant::now());
+    }
+
+    /// Drop an "...ing..." progress note once its result popup is up, so the
+    /// status bar stops saying "verifying..." under the outcome.
+    pub fn clear_progress_status(&mut self) {
+        if self
+            .status_message
+            .as_deref()
+            .is_some_and(|m| m.ends_with("..."))
+        {
+            self.status_message = None;
+            self.status_message_at = None;
+        }
     }
 
     /// Remove a label from an item's local state (revert of add_label_local).
@@ -2524,6 +2547,7 @@ mod tests {
         assert!(Popup::ConfirmSprint {
             title: String::new(),
             message: String::new(),
+            sprint_label: String::new(),
             choices: Vec::new(),
             selected: 0,
             on_confirm: ConfirmAction::Quit,

@@ -159,7 +159,8 @@ notification per ticket. `U` is for a ticket verified on its own.
 
 Fail and Return ask where the ticket goes next: keep its sprint, move it to the
 sprint running today, or to the next one (arrow keys in the confirm). Keep is
-the default.
+the default. On Fail the choice is for the parent being sent back, not for the
+new bug, which the form files into the sprint running today.
 
 Before moving a ticket to In UAT, `d` in the ticket view checks its linked PRs
 against the deploy branches, and `d` in the Move to In UAT list checks every
@@ -168,11 +169,14 @@ not, and `?` that the commit is not in the branch's history but the change may
 have arrived by cherry-pick, so it is never read as "not deployed". `-` means
 GitHub found no such branch, commit or repository, and `!` that the check
 failed. The list's UAT column is `✓` only when every open or merged linked PR
-is merged and on UAT. A ticket only shows the PRs GitHub links to it; one whose
-PR was never linked shows "none linked on GitHub".
+is merged and on UAT; a key to the marks shows under the list once a check has
+run. A ticket only shows the PRs GitHub links to it; one whose PR was never
+linked shows "none linked on GitHub". If a later refresh of the PR list fails,
+the last list stays, marked as such, and `d` checks that one.
 
 The tickets waiting for a UAT deploy are listed in My Tasks under Waiting for
-deploy; `I` on one of them opens Move to In UAT.
+deploy; `I` on one of them opens Move to In UAT, with the cursor on that
+ticket.
 
 Each action is only offered from the column it belongs to. The QA actions menu
 (`p`) lists them all and dims the ones that do not apply, with the reason.

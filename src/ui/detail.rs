@@ -79,7 +79,10 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
     }
 
     // ─── Linked PRs ───
-    if let Some(e) = app.linked_prs_failed.get(&item.id) {
+    // A failed lookup only replaces the list when there is none to show: a
+    // failed refresh keeps the last list and says so under its header.
+    let lookup_failed = app.linked_prs_failed.get(&item.id);
+    if let Some(e) = lookup_failed.filter(|_| item.linked_prs.is_empty()) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  -- Linked PRs: could not load (r to retry) --",
@@ -106,6 +109,21 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
             theme::title(),
         )));
         let text_w = (area.width.saturating_sub(10) as usize).max(20);
+        if let Some(e) = lookup_failed {
+            let note = format!(
+                "Refresh failed ({}) - this is the last list loaded; r retries",
+                e
+            );
+            for part in super::utils::word_wrap(&note, text_w + 2)
+                .into_iter()
+                .take(2)
+            {
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", part),
+                    theme::warning(),
+                )));
+            }
+        }
         for pr in &item.linked_prs {
             // `be-compliance-api#2103  merged -> develop`, then the title.
             let state_style = if pr.is_merged() {
@@ -308,6 +326,19 @@ fn add_field_row(lines: &mut Vec<Line<'_>>, label1: &str, val1: &str, label2: &s
         lines.push(Line::from(vec![
             Span::styled(format!("  {:<10}", label1), theme::dim()),
             Span::styled(val1.to_string(), theme::normal()),
+        ]));
+    } else if val1.chars().count() >= 20 {
+        // Too long for its column (a ticket with several labels): the value
+        // keeps its row and the second field moves under it, instead of
+        // running into it as `Ready-for-UATCreated`.
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<10}", label1), theme::dim()),
+            Span::styled(val1.to_string(), theme::normal()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(32)),
+            Span::styled(format!("{:<10}", label2), theme::dim()),
+            Span::styled(val2.to_string(), theme::normal()),
         ]));
     } else {
         lines.push(Line::from(vec![

@@ -134,10 +134,24 @@ pub fn confirm_with_sprint(
     on_confirm: ConfirmAction,
 ) {
     let choices = app.sprint_choices(item_idx);
+    let num = app
+        .items
+        .get(item_idx)
+        .and_then(|i| i.number)
+        .map(|n| format!("#{}", n))
+        .unwrap_or_else(|| "this ticket".to_string());
+    // On Fail the sprint moves the parent, while the form beside it has its
+    // own Sprint for the new bug: say which ticket this one is for.
+    let sprint_label = if matches!(on_confirm, ConfirmAction::SubmitBugReport(..)) {
+        format!("Sprint for {} (the parent):", num)
+    } else {
+        format!("Sprint for {}:", num)
+    };
     app.popup = if choices.len() > 1 {
         Popup::ConfirmSprint {
             title,
             message,
+            sprint_label,
             choices,
             selected: 0,
             on_confirm,
@@ -211,7 +225,7 @@ pub fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
                     let rows = app.move_to_uat_candidates(item_idx);
                     // Each ticket's deploy is its own: only the one in hand
                     // starts checked.
-                    app.open_batch_picker(BatchKind::MoveToUat, &rows, |i| i == item_idx);
+                    app.open_batch_picker(BatchKind::MoveToUat, &rows, item_idx, |i| i == item_idx);
                 }
                 Err(msg) => app.popup = Popup::Error(msg),
             }
@@ -223,7 +237,7 @@ pub fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
                     let rows = app.verify_uat_candidates(item_idx);
                     // A regression run clears everything deployed: all checked,
                     // the QA unchecks what the run did not cover.
-                    app.open_batch_picker(BatchKind::VerifyUat, &rows, |_| true);
+                    app.open_batch_picker(BatchKind::VerifyUat, &rows, item_idx, |_| true);
                 }
                 Err(msg) => app.popup = Popup::Error(msg),
             }

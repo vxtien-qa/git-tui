@@ -31,8 +31,27 @@ fn actions_for(app: &App, item_idx: usize) -> Vec<Action> {
     let has_staging = app.item_has_label(item_idx, "Ready-for-Staging");
     let has_uat = app.item_has_label(item_idx, "Ready-for-UAT");
     let in_qa_column = matches!(status, Status::InQADev | Status::InQA | Status::InUAT);
-    // Bulk verify picks from the In UAT column, so say how big it is.
+    // Bulk verify picks from the In UAT column, so say how big it is. The
+    // ticket in hand is offered even when it sits outside the sprint the
+    // board shows: then it is named apart instead of counted into the sprint.
     let uat_batch = app.verify_uat_candidates(item_idx).len();
+    let uat_sprint = app.board_sprint_filter.as_deref().unwrap_or("all sprints");
+    let in_sprint = app
+        .items_in_column(&Status::InUAT)
+        .iter()
+        .any(|(i, _)| *i == item_idx);
+    let verify_effect = if in_sprint {
+        format!(
+            "pick from the {} In UAT ticket(s) in {} and pass them together",
+            uat_batch, uat_sprint
+        )
+    } else {
+        format!(
+            "pick from this ticket and the {} In UAT ticket(s) in {}, pass them together",
+            uat_batch.saturating_sub(1),
+            uat_sprint
+        )
+    };
 
     let wrong_column = |expected: &str| Some(format!("needs {}", expected));
 
@@ -69,11 +88,7 @@ fn actions_for(app: &App, item_idx: usize) -> Vec<Action> {
         Action {
             key: "V",
             name: "Bulk verify UAT",
-            effect: format!(
-                "pick from the {} In UAT ticket(s) in {} and pass them together",
-                uat_batch,
-                app.board_sprint_filter.as_deref().unwrap_or("all sprints")
-            ),
+            effect: verify_effect,
             available: status == Status::InUAT,
             blocked_reason: wrong_column("In UAT"),
         },
@@ -150,45 +165,82 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize) {
 
     let popup_w = (f.area().width.saturating_sub(4)).min(64);
     let inner_w = popup_w.saturating_sub(4) as usize;
+    let status = app
+        .items
+        .get(item_idx)
+        .map(|i| i.status.clone())
+        .unwrap_or_default();
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled("  Currently in  ", theme::dim()),
-        Span::styled(
-            status_label.to_string(),
-            theme::status_style(
-                &app.items
-                    .get(item_idx)
-                    .map(|i| i.status.clone())
-                    .unwrap_or_default(),
-            ),
-        ),
-    ]));
-    lines.push(Line::from(""));
-
-    // Two lines per action (name, then what it does) when the terminal is
-    // tall enough; one line each otherwise, so the bottom rows and the way
-    // out never fall off a short terminal.
-    let full_h = actions
+    // Four layouts, roomiest first, so every action and the way out stay on
+    // screen down to the 60x10 minimum:
+    // - Full: name, then what it does, wrapped;
+    // - Compact: one line per action;
+    // - Tight: the same without the spacer rows, the column moving into the
+    //   title;
+    // - Grid: two actions per row, names only.
+    let rows_avail = f.area().height.saturating_sub(4) as usize;
+    let n = actions.len();
+    let full_rows = actions
         .iter()
         .map(|a| 1 + super::utils::word_wrap(&action_detail(a), inner_w.saturating_sub(8)).len())
         .sum::<usize>()
-        + 7; // header, blanks, the extra-keys row, footer, border
-    let compact = full_h > f.area().height.saturating_sub(2) as usize;
+        + 6;
+    let layout = if full_rows <= rows_avail {
+        Layout::Full
+    } else if n + 6 <= rows_avail {
+        Layout::Compact
+    } else if n + 2 <= rows_avail {
+        Layout::Tight
+    } else {
+        Layout::Grid
+    };
+    let roomy = matches!(layout, Layout::Full | Layout::Compact);
 
-    for a in &actions {
-        let (key_style, name_style) = if a.available {
+    let mut lines: Vec<Line> = Vec::new();
+    if roomy {
+        lines.push(Line::from(vec![
+            Span::styled("  Currently in  ", theme::dim()),
+            Span::styled(status_label.to_string(), theme::status_style(&status)),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    let styles = |a: &Action| {
+        if a.available {
             (theme::highlight(), theme::normal())
         } else {
             (theme::dim(), theme::dim())
-        };
+        }
+    };
+    if layout == Layout::Grid {
+        let col_w = inner_w.saturating_sub(2) / 2;
+        for pair in actions.chunks(2) {
+            let mut spans = vec![Span::raw("  ")];
+            for a in pair {
+                let (key_style, name_style) = styles(a);
+                let name_w = col_w.saturating_sub(5);
+                spans.push(Span::styled(format!("[{}] ", a.key), key_style));
+                spans.push(Span::styled(
+                    format!(
+                        "{:<w$}",
+                        super::utils::trunc(a.name, name_w),
+                        w = name_w + 1
+                    ),
+                    name_style,
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    for a in actions.iter().filter(|_| layout != Layout::Grid) {
+        let (key_style, name_style) = styles(a);
         let detail = action_detail(a);
         let detail_style = if a.available {
             theme::dim()
         } else {
             theme::warning()
         };
-        if compact {
+        if layout != Layout::Full {
             let room = inner_w.saturating_sub(6 + 22);
             lines.push(Line::from(vec![
                 Span::styled(format!("  [{}] ", a.key), key_style),
@@ -214,20 +266,33 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize) {
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  [c] ", theme::highlight()),
-        Span::styled("Comment", theme::normal()),
-        Span::styled("  [m] ", theme::highlight()),
-        Span::styled("Move", theme::normal()),
-        Span::styled("  [t] ", theme::highlight()),
-        Span::styled("Task", theme::normal()),
-        Span::styled("  [b] ", theme::highlight()),
-        Span::styled("Bug", theme::normal()),
-        Span::styled("  [e] ", theme::highlight()),
-        Span::styled("Enhancement", theme::normal()),
-    ]));
-    lines.push(Line::from(""));
+    // The other ticket keys; the grid keeps them only when a row is left.
+    if roomy {
+        lines.push(Line::from(""));
+    }
+    if layout != Layout::Grid || n.div_ceil(2) + 2 <= rows_avail {
+        // The row is 59 columns; a narrow popup shortens its last label.
+        let enhancement = if inner_w + 2 >= 59 {
+            "Enhancement"
+        } else {
+            "Enh."
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  [c] ", theme::highlight()),
+            Span::styled("Comment", theme::normal()),
+            Span::styled("  [m] ", theme::highlight()),
+            Span::styled("Move", theme::normal()),
+            Span::styled("  [t] ", theme::highlight()),
+            Span::styled("Task", theme::normal()),
+            Span::styled("  [b] ", theme::highlight()),
+            Span::styled("Bug", theme::normal()),
+            Span::styled("  [e] ", theme::highlight()),
+            Span::styled(enhancement, theme::normal()),
+        ]));
+    }
+    if roomy {
+        lines.push(Line::from(""));
+    }
     lines.push(super::utils::footer_line(&[("Esc", "Cancel")], inner_w));
 
     // Height follows the content, clamped to the terminal, so nothing clips.
@@ -239,13 +304,24 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize) {
     );
     f.render_widget(Clear, area);
 
+    let title = if roomy {
+        format!(" QA Action - {} ", number)
+    } else {
+        format!(" QA Action - {} ({}) ", number, status_label)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::title())
-        .title(Span::styled(
-            format!(" QA Action - {} ", number),
-            theme::title(),
-        ));
+        .title(Span::styled(title, theme::title()));
 
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// How much of the QA menu fits (see `render`).
+#[derive(Clone, Copy, PartialEq)]
+enum Layout {
+    Full,
+    Compact,
+    Tight,
+    Grid,
 }

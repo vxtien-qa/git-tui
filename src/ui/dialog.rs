@@ -69,19 +69,40 @@ pub fn render_move(f: &mut Frame, app: &App, item_indices: &[usize]) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Width a popup message wraps to: the border plus two blank columns on
+/// each side, so the text never runs into the right border.
+fn text_width(popup_w: u16) -> usize {
+    popup_w.saturating_sub(6) as usize
+}
+
+/// Fit a popup's rows to the terminal and give back the popup height.
+///
+/// The last `keep` rows (the keys) always stay. On a short terminal the
+/// blank spacer rows go first, then message rows from the bottom; the last
+/// message row kept becomes "..." so the cut is visible.
+fn fit_rows(mut lines: Vec<Line<'static>>, keep: usize, max_h: u16) -> (Vec<Line<'static>>, u16) {
+    let max_rows = max_h.saturating_sub(2) as usize;
+    if lines.len() > max_rows {
+        lines.retain(|l| l.width() > 0);
+    }
+    if lines.len() > max_rows {
+        let tail = lines.split_off(lines.len().saturating_sub(keep));
+        lines.truncate(max_rows.saturating_sub(tail.len()));
+        if let Some(last) = lines.last_mut() {
+            *last = Line::from(Span::styled("  ...", theme::dim()));
+        }
+        lines.extend(tail);
+    }
+    let height = (lines.len() as u16 + 2).min(max_h);
+    (lines, height)
+}
+
 /// Render a confirmation dialog.
 pub fn render_confirm(f: &mut Frame, title: &str, message: &str) {
     let popup_w = (f.area().width.saturating_sub(4)).min(50);
-    let inner_w = popup_w.saturating_sub(4) as usize;
-
-    let wrapped = wrap_message(message, inner_w);
-    let max_h = f.area().height.saturating_sub(4);
-    let height = (wrapped.len() as u16 + 4).clamp(6, max_h.max(6));
-    let area = centered_rect(popup_w, height, f.area());
-    f.render_widget(Clear, area);
 
     let mut lines = vec![Line::from("")];
-    for line in &wrapped {
+    for line in wrap_message(message, text_width(popup_w)) {
         lines.push(Line::from(Span::styled(
             format!("  {}", line),
             theme::normal(),
@@ -95,6 +116,9 @@ pub fn render_confirm(f: &mut Frame, title: &str, message: &str) {
         Span::styled("[Esc/n] ", theme::dim()),
         Span::styled("Cancel", theme::dim()),
     ]));
+    let (lines, height) = fit_rows(lines, 1, f.area().height.saturating_sub(2));
+    let area = centered_rect(popup_w, height, f.area());
+    f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -109,6 +133,7 @@ pub fn render_confirm_sprint(
     f: &mut Frame,
     title: &str,
     message: &str,
+    sprint_label: &str,
     choices: &[crate::app::SprintChoice],
     selected: usize,
 ) {
@@ -116,14 +141,17 @@ pub fn render_confirm_sprint(
     let inner_w = popup_w.saturating_sub(4) as usize;
 
     let mut lines = vec![Line::from("")];
-    for line in wrap_message(message, inner_w) {
+    for line in wrap_message(message, text_width(popup_w)) {
         lines.push(Line::from(Span::styled(
             format!("  {}", line),
             theme::normal(),
         )));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("  Sprint:", theme::dim())));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", sprint_label),
+        theme::dim(),
+    )));
     // Chips wrap so every choice stays visible on a narrow terminal.
     let mut row: Vec<Span> = vec![Span::raw("  ")];
     let mut row_w = 2;
@@ -199,10 +227,9 @@ pub fn render_confirm_sprint(
 /// Render a pick-one popup: a message, then one `[key] label` row per choice.
 pub fn render_choice(f: &mut Frame, title: &str, message: &str, choices: &[(&str, &str)]) {
     let popup_w = (f.area().width.saturating_sub(4)).min(50);
-    let inner_w = popup_w.saturating_sub(4) as usize;
 
     let mut lines = vec![Line::from("")];
-    for line in wrap_message(message, inner_w) {
+    for line in wrap_message(message, text_width(popup_w)) {
         lines.push(Line::from(Span::styled(
             format!("  {}", line),
             theme::normal(),
@@ -242,7 +269,7 @@ pub fn render_text_prompt(f: &mut Frame, title: &str, message: &str, value: &str
     let inner_w = popup_w.saturating_sub(4) as usize;
 
     let mut lines = vec![Line::from("")];
-    for line in wrap_message(message, inner_w) {
+    for line in wrap_message(message, text_width(popup_w)) {
         lines.push(Line::from(Span::styled(
             format!("  {}", line),
             theme::normal(),
@@ -339,17 +366,9 @@ pub fn render_pick_list(f: &mut Frame, title: &str, entries: &[String], selected
 /// Render an error popup.
 pub fn render_error(f: &mut Frame, message: &str) {
     let popup_w = (f.area().width.saturating_sub(4)).min(70);
-    let inner_w = popup_w.saturating_sub(4) as usize; // border + padding
-
-    let wrapped = wrap_message(message, inner_w);
-
-    let max_h = f.area().height.saturating_sub(4);
-    let height = (wrapped.len() as u16 + 4).min(max_h).max(6);
-    let area = centered_rect(popup_w, height, f.area());
-    f.render_widget(Clear, area);
 
     let mut lines = vec![Line::from("")];
-    for line in &wrapped {
+    for line in wrap_message(message, text_width(popup_w)) {
         lines.push(Line::from(Span::styled(
             format!("  {}", line),
             theme::error(),
@@ -360,6 +379,9 @@ pub fn render_error(f: &mut Frame, message: &str) {
         "  Press any key to dismiss",
         theme::dim(),
     )));
+    let (lines, height) = fit_rows(lines, 1, f.area().height.saturating_sub(2));
+    let area = centered_rect(popup_w, height, f.area());
+    f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -372,16 +394,9 @@ pub fn render_error(f: &mut Frame, message: &str) {
 /// Render a success popup.
 pub fn render_success(f: &mut Frame, message: &str) {
     let popup_w = (f.area().width.saturating_sub(4)).min(60);
-    let inner_w = popup_w.saturating_sub(4) as usize;
-
-    let wrapped = wrap_message(message, inner_w);
-    let max_h = f.area().height.saturating_sub(4);
-    let height = (wrapped.len() as u16 + 4).min(max_h).max(6);
-    let area = centered_rect(popup_w, height, f.area());
-    f.render_widget(Clear, area);
 
     let mut lines = vec![Line::from("")];
-    for line in &wrapped {
+    for line in wrap_message(message, text_width(popup_w)) {
         lines.push(Line::from(Span::styled(
             format!("  {}", line),
             theme::normal(),
@@ -392,6 +407,9 @@ pub fn render_success(f: &mut Frame, message: &str) {
         "  Press any key to dismiss",
         theme::dim(),
     )));
+    let (lines, height) = fit_rows(lines, 1, f.area().height.saturating_sub(2));
+    let area = centered_rect(popup_w, height, f.area());
+    f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)

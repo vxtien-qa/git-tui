@@ -232,7 +232,7 @@ impl DeployState {
         if message.contains("HTTP 404") || message.contains("Not Found") {
             DeployState::NotFound
         } else {
-            DeployState::Failed(message.lines().last().unwrap_or(message).to_string())
+            DeployState::Failed(client::gh_reason(message))
         }
     }
 }
@@ -412,6 +412,13 @@ mod tests {
             DeployState::from_error("gh: API rate limit exceeded (HTTP 403)"),
             DeployState::Failed(_)
         ));
+        // The reason, not the echoed command.
+        assert_eq!(
+            DeployState::from_error(
+                "gh api repos/x/compare/uat...abc?per_page=1 --jq .status failed: gh: Bad credentials (HTTP 401)"
+            ),
+            DeployState::Failed("gh: Bad credentials (HTTP 401)".to_string())
+        );
     }
 
     #[test]

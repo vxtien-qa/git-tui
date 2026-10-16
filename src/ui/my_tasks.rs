@@ -31,19 +31,21 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .filter(|(_, i)| matches!(i.status, Status::InQA | Status::InQADev | Status::InUAT))
         .count();
+    let waiting_total = app.waiting_for_deploy().len();
     let sprint_label = app.board_sprint_filter.as_deref().unwrap_or("All Sprints");
     let header_w = (w).saturating_sub(13); // leave room for the title
                                            // Least important fact drops first, so what remains stays readable.
-    let header_info = super::utils::fit_parts(
-        &[
-            format!("[s] {}", sprint_label),
-            format!("{} total", displayed_total),
-            format!("{} in QA", in_qa),
-            format!("@{}", app.current_user),
-        ],
-        "  |  ",
-        header_w,
-    );
+    let mut parts = vec![
+        format!("[s] {}", sprint_label),
+        format!("{} total", displayed_total),
+        format!("{} in QA", in_qa),
+    ];
+    // The rows below the groups count in the list position too.
+    if waiting_total > 0 {
+        parts.push(format!("{} waiting for deploy", waiting_total));
+    }
+    parts.push(format!("@{}", app.current_user));
+    let header_info = super::utils::fit_parts(&parts, "  |  ", header_w);
     let header_info_trunc = header_info;
     let header = Line::from(vec![
         Span::styled(" My Tasks", theme::title()),
@@ -160,7 +162,14 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     // "Waiting for deploy" - passed tickets QA would otherwise lose track of
     // (labelled Ready-for-Staging/UAT, still sitting in the passed-from column).
+    let group_rows = global_idx;
     let waiting = app.waiting_for_deploy();
+    // The selected waiting row, if the cursor is on one: its keys differ.
+    let waiting_selected = app
+        .list_selected
+        .checked_sub(group_rows)
+        .and_then(|i| waiting.get(i))
+        .map(|(_, item)| item.status == Status::InQADev);
     if !waiting.is_empty() {
         let label = format!("Waiting for deploy ({})", waiting.len());
         let sep_w = col_w.saturating_sub(label.chars().count() + 5);
@@ -211,21 +220,29 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         ));
     f.render_widget(Paragraph::new(visible).block(block), chunks[1]);
 
-    // Footer: fits any width, and never drops the way back.
-    let footer = super::utils::footer_line(
-        &[
-            (theme::icon_up_down(), "Nav"),
-            ("p", "QA Actions"),
-            ("I", "To In UAT"),
-            ("Enter", "Detail"),
-            ("f", "Fail"),
-            ("m", "Move"),
-            ("s", "Sprint"),
-            ("r", "Refresh"),
-            ("?", "Help"),
-            ("Esc", "Back"),
-        ],
-        area.width as usize,
-    );
+    // Footer: the keys of the selected row first; fits any width, and never
+    // drops the way back.
+    let mut hints: Vec<(&str, &str)> = vec![(theme::icon_up_down(), "Nav")];
+    match waiting_selected {
+        // Waiting on the STG deploy: only the label can be acted on.
+        Some(true) => hints.push(("x", "Clear label")),
+        Some(false) => {
+            hints.push(("I", "To In UAT"));
+            hints.push(("x", "Clear label"));
+        }
+        None => {}
+    }
+    hints.extend_from_slice(&[("Enter", "Detail"), ("p", "QA Actions")]);
+    if waiting_selected.is_none() {
+        hints.push(("f", "Fail"));
+    }
+    hints.extend_from_slice(&[
+        ("m", "Move"),
+        ("s", "Sprint"),
+        ("r", "Refresh"),
+        ("?", "Help"),
+        ("Esc", "Back"),
+    ]);
+    let footer = super::utils::footer_line(&hints, area.width as usize);
     f.render_widget(Paragraph::new(footer), chunks[2]);
 }

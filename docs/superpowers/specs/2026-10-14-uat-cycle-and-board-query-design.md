@@ -311,6 +311,20 @@ its descriptions. The live-status re-read before each write still lets the
 write through when the read itself fails, as it did before this work (a
 decision from the July audit: an unreliable network must not block QA).
 
+## UI sweep (2026-10-16)
+
+The app was driven in a pseudo-terminal at 120x35, 80x24, 60x16 and 60x10,
+with GitHub writes blocked and Slack pointed at a dead webhook. Fixed in
+checkpoint 16: confirm, error and success popups sized one row short, which
+hid the keys of every multi-line confirm; the dashboard's Status Breakdown
+counting Tech Complete twice (once in its own row, once in Done); deploy-check
+and linked-PR failures shown as the raw `gh` command instead of the reason,
+one popup line per PR and branch; a failed PR refresh showing "could not load"
+over the last list while `d` refused to run; and smaller gaps (pick-list
+legend and cursor, My Tasks footer per row, QA menu layouts down to 60x10, the
+Fail sprint row naming the parent, filter-row position, toggle order, labels
+running into `Created`, a stale progress note).
+
 ## Checkpoints
 
 Work lands as one commit per step on `feat/v3.3.0-uat-cycle-board-query`,
@@ -336,6 +350,8 @@ the footers, so the QA can stop at any tag and test by hand. To drop a step:
 | `cp/12-review-risks` | Risks found in review |
 | `cp/13-design-gaps` | My Tasks waiting rows, `d` in pick lists, contextual footer |
 | `cp/14-docs-ui` | Help wrapping, small-terminal popups, docs |
+| `cp/15-final-fixes` | Findings of the final review |
+| `cp/16-ui-sweep` | UI sweep fixes for the new flows |
 
 ## Release
 

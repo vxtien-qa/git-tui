@@ -69,10 +69,12 @@ impl Default for SlackNotifyConfig {
 }
 
 impl SlackNotifyConfig {
-    /// Labels for display in the config screen (ordered).
+    /// Labels for display in the config screen, in the order a ticket goes
+    /// through QA.
     pub const LABELS: [&str; 12] = [
         "Pass Dev",
         "Pass STG",
+        "Move to In UAT",
         "Pass UAT (U, V)",
         "Return (Fail)",
         "Bug Report",
@@ -82,7 +84,6 @@ impl SlackNotifyConfig {
         "Daily Standup",
         "Sprint Report",
         "New Task",
-        "Move to In UAT",
     ];
 
     /// Get toggle value by index.
@@ -90,16 +91,16 @@ impl SlackNotifyConfig {
         match idx {
             0 => self.pass_dev,
             1 => self.pass_stg,
-            2 => self.pass_uat,
-            3 => self.return_fail,
-            4 => self.bug_report,
-            5 => self.enhancement,
-            6 => self.comment,
-            7 => self.move_items,
-            8 => self.daily_standup,
-            9 => self.sprint_report,
-            10 => self.new_task,
-            11 => self.move_to_uat,
+            2 => self.move_to_uat,
+            3 => self.pass_uat,
+            4 => self.return_fail,
+            5 => self.bug_report,
+            6 => self.enhancement,
+            7 => self.comment,
+            8 => self.move_items,
+            9 => self.daily_standup,
+            10 => self.sprint_report,
+            11 => self.new_task,
             _ => false,
         }
     }
@@ -109,16 +110,16 @@ impl SlackNotifyConfig {
         match idx {
             0 => self.pass_dev = !self.pass_dev,
             1 => self.pass_stg = !self.pass_stg,
-            2 => self.pass_uat = !self.pass_uat,
-            3 => self.return_fail = !self.return_fail,
-            4 => self.bug_report = !self.bug_report,
-            5 => self.enhancement = !self.enhancement,
-            6 => self.comment = !self.comment,
-            7 => self.move_items = !self.move_items,
-            8 => self.daily_standup = !self.daily_standup,
-            9 => self.sprint_report = !self.sprint_report,
-            10 => self.new_task = !self.new_task,
-            11 => self.move_to_uat = !self.move_to_uat,
+            2 => self.move_to_uat = !self.move_to_uat,
+            3 => self.pass_uat = !self.pass_uat,
+            4 => self.return_fail = !self.return_fail,
+            5 => self.bug_report = !self.bug_report,
+            6 => self.enhancement = !self.enhancement,
+            7 => self.comment = !self.comment,
+            8 => self.move_items = !self.move_items,
+            9 => self.daily_standup = !self.daily_standup,
+            10 => self.sprint_report = !self.sprint_report,
+            11 => self.new_task = !self.new_task,
             _ => {}
         }
     }

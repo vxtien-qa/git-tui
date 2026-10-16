@@ -200,7 +200,7 @@ pub fn handle_save_preset(app: &mut App, key: KeyCode, modifiers: KeyModifiers) 
             app.upsert_search_preset(&name);
             app.popup = match app.config.save() {
                 Ok(()) => crate::app::Popup::Success(format!(
-                    "{} saved filter '{}'. Ctrl+O opens it.",
+                    "{} filter '{}'. Ctrl+O opens the saved filters.",
                     if replaced { "Updated" } else { "Saved" },
                     name
                 )),

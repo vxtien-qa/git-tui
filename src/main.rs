@@ -439,6 +439,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     if confirm_open {
                         app.set_status(&msg);
                     } else {
+                        app.clear_progress_status();
                         app.popup = Popup::Success(msg);
                     }
                 }
@@ -446,6 +447,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     if confirm_open {
                         app.set_status(&format!("Error: {}", msg));
                     } else {
+                        app.clear_progress_status();
                         app.popup = Popup::Error(msg);
                     }
                 }
@@ -462,6 +464,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     if confirm_open {
                         app.set_status(&msg);
                     } else {
+                        app.clear_progress_status();
                         app.popup = Popup::Success(msg);
                     }
                 }
@@ -473,6 +476,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     if confirm_open {
                         app.set_status("✓ Comment posted!");
                     } else {
+                        app.clear_progress_status();
                         app.popup = Popup::Success("✓ Comment posted!".to_string());
                     }
                 }
@@ -557,6 +561,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             }
                         ));
                     } else {
+                        app.clear_progress_status();
                         if warnings.is_empty() {
                             app.popup = Popup::Success("Ticket created successfully!".to_string());
                         } else {
@@ -580,16 +585,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     results,
                 } => {
                     app.deploy_check_inflight.remove(&item_id);
-                    let failures: Vec<String> = results
+                    let prs = app
+                        .items
                         .iter()
-                        .flat_map(|(_, states)| states.iter())
-                        .filter_map(|(env, s)| match s {
-                            crate::gh::issue::DeployState::Failed(e) => {
-                                Some(format!("{}: {}", env, e))
-                            }
-                            _ => None,
-                        })
-                        .collect();
+                        .find(|i| i.id == item_id)
+                        .map(|i| i.linked_prs.clone())
+                        .unwrap_or_default();
+                    let failure = loader::deploy_failure_report(&label, &results, &prs);
+                    let nothing_checked = results.is_empty();
                     app.deploy_checks.extend(results);
                     let summary = app
                         .items
@@ -597,30 +600,32 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         .find(|i| i.id == item_id)
                         .map(|i| app.deploy_summary(i))
                         .unwrap_or_default();
-                    if let Some(e) = app.linked_prs_failed.get(&item_id) {
-                        app.set_status(&format!(
-                            "Deploy check {}: could not read linked PRs ({})",
-                            label, e
-                        ));
-                    } else if failures.is_empty() && summary.is_empty() {
-                        app.set_status(&format!(
-                            "Deploy check {}: no merged linked PR to check",
-                            label
-                        ));
-                    } else if failures.is_empty() {
-                        app.set_status(&format!("Deploy check {}: {}", label, summary));
-                    } else if confirm_open {
-                        app.set_status(&format!(
-                            "Deploy check {} could not finish: {}",
-                            label,
-                            failures.join("; ")
-                        ));
-                    } else {
-                        app.popup = Popup::Error(format!(
-                            "Deploy check {} could not finish:\n{}",
-                            label,
-                            failures.join("\n")
-                        ));
+                    // The pick list checks many tickets at once: its rows show
+                    // ! and the run ends with a count, so one popup per ticket
+                    // would only stack up.
+                    let in_pick_list = matches!(app.screen, Screen::BatchPicker(_));
+                    match (app.linked_prs_failed.get(&item_id), failure) {
+                        (Some(e), _) if nothing_checked => {
+                            app.set_status(&format!(
+                                "Deploy check {}: could not read linked PRs ({}) - press r to reload",
+                                label, e
+                            ));
+                        }
+                        (_, Some((status, popup))) => {
+                            if confirm_open || in_pick_list {
+                                app.set_status(&status);
+                            } else {
+                                app.clear_progress_status();
+                                app.popup = Popup::Error(popup);
+                            }
+                        }
+                        _ if summary.is_empty() => {
+                            app.set_status(&format!(
+                                "Deploy check {}: no merged linked PR to check",
+                                label
+                            ));
+                        }
+                        _ => app.set_status(&format!("Deploy check {}: {}", label, summary)),
                     }
                 }
                 crate::app::ActionResult::ItemDetailFetched {
@@ -725,7 +730,8 @@ fn apply_linked_prs(
             app.linked_prs_failed.remove(item_id);
         }
         Err(e) => {
-            app.linked_prs_failed.insert(item_id.to_string(), e);
+            app.linked_prs_failed
+                .insert(item_id.to_string(), crate::gh::client::gh_reason(&e));
         }
     }
 }
@@ -1107,10 +1113,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Popup::ConfirmSprint {
             title,
             message,
+            sprint_label,
             choices,
             selected,
             ..
-        } => ui::dialog::render_confirm_sprint(f, title, message, choices, *selected),
+        } => ui::dialog::render_confirm_sprint(f, title, message, sprint_label, choices, *selected),
         Popup::SavePreset { name } => ui::dialog::render_text_prompt(
             f,
             "Save filters",
@@ -1520,6 +1527,49 @@ mod render_tests {
         }
     }
 
+    /// Every row of a rendered screen, as text.
+    fn screen_rows(app: &mut App, w: u16, h: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The Status Breakdown counts each ticket once: Tech Complete has its own
+    /// row, so the Done row is the Done column alone.
+    #[test]
+    fn dashboard_breakdown_counts_each_ticket_once() {
+        let mut app = app_with_items();
+        for (i, item) in app.items.iter_mut().enumerate() {
+            item.status = match i {
+                0 | 1 => crate::models::status::Status::TechComplete,
+                2 => crate::models::status::Status::Done,
+                _ => crate::models::status::Status::InProgress,
+            };
+        }
+        app.screen = Screen::Dashboard;
+        let rows = screen_rows(&mut app, 120, 60);
+        // A breakdown row reads `   Done ███░ 1` inside the panel's borders.
+        let count_of = |label: &str| -> Option<String> {
+            rows.iter()
+                .flat_map(|r| r.split('│'))
+                .map(str::trim)
+                .find(|seg| {
+                    seg.strip_prefix(label)
+                        .is_some_and(|rest| rest.starts_with(" █") || rest.starts_with(" ░"))
+                })
+                .and_then(|seg| seg.split_whitespace().last().map(str::to_string))
+        };
+        assert_eq!(count_of("Tech Complete").as_deref(), Some("2"));
+        assert_eq!(count_of("Done").as_deref(), Some("1"));
+    }
+
     /// Popups sit on top of every screen, so they get the same treatment.
     #[test]
     fn every_popup_renders_at_every_size() {
@@ -1532,6 +1582,7 @@ mod render_tests {
             Popup::ConfirmSprint {
                 title: "Return - #4218".to_string(),
                 message: "Move back to In Progress + comment tagging the devs?\nBoth Ready-for-* labels are cleared, so the ticket needs a full re-verify.".to_string(),
+                sprint_label: "Sprint for #4218:".to_string(),
                 choices: vec![
                     crate::app::SprintChoice {
                         label: "Keep (Sprint 30)".to_string(),
@@ -1558,6 +1609,18 @@ mod render_tests {
                 message: "Move to In UAT?\n#401, #402, #403".to_string(),
                 on_confirm: ConfirmAction::Quit,
             },
+            // As long as the real batch confirms: the keys used to fall off.
+            Popup::Confirm {
+                title: "Move to In UAT - 2 ticket(s)".to_string(),
+                message: "Code is on UAT.\nMove 2 ticket(s) to In UAT, remove Ready-for-UAT and comment on each:\n#4008, #4382\nOne Slack message lists them.".to_string(),
+                on_confirm: ConfirmAction::Quit,
+            },
+            Popup::Error(
+                (0..12)
+                    .map(|i| format!("repo#{}: Dev, STG, UAT, Prod - HTTP 502", 2100 + i))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
         ];
         for (w, h) in [(40u16, 8u16), (60, 10), (80, 24), (100, 30), (200, 60)] {
             for popup in &popups {
@@ -1574,20 +1637,29 @@ mod render_tests {
                 terminal
                     .draw(|f| draw(f, &mut app))
                     .unwrap_or_else(|e| panic!("popup at {}x{} failed: {}", w, h, e));
-                // A popup waiting on the user must keep its way out on
-                // screen at the documented minimum (60x10) and up.
-                if popup.is_interactive() && w >= 60 && h >= 10 {
+                // Every popup keeps its own way out on screen at the
+                // documented minimum (60x10) and up. Its own: the screen
+                // behind has an `Esc:Back` of its own in the footer.
+                let exit = match popup {
+                    Popup::Error(_) | Popup::Success(_) => "Press any key to dismiss",
+                    Popup::Confirm { .. } | Popup::ConfirmSprint { .. } => "[Esc/n] Cancel",
+                    Popup::CopyResults | Popup::SavePreset { .. } => "[Esc] Cancel",
+                    Popup::Presets { .. } => "Esc:Close",
+                    Popup::None => "",
+                };
+                if w >= 60 && h >= 10 {
                     let buffer = terminal.backend().buffer().clone();
                     let text: String = (0..h)
                         .flat_map(|y| (0..w).map(move |x| (x, y)))
                         .map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
                         .collect();
                     assert!(
-                        text.contains("Esc"),
-                        "{:?} at {}x{} hides its Esc key",
+                        text.contains(exit),
+                        "{:?} at {}x{} hides {:?}",
                         popup,
                         w,
-                        h
+                        h,
+                        exit
                     );
                 }
             }

@@ -540,14 +540,20 @@ pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
             return;
         }
     }
-    if let Some(e) = app.linked_prs_failed.get(&item.id) {
+    // A failed refresh keeps the last list on screen: check that one. Only
+    // with nothing to show does the failure stop the check.
+    let lookup_failed = app.linked_prs_failed.get(&item.id).cloned();
+    if let Some(e) = lookup_failed
+        .as_ref()
+        .filter(|_| item.linked_prs.is_empty())
+    {
         app.set_status(&format!(
             "Linked PRs could not be loaded ({}) - press r to reload",
             e
         ));
         return;
     }
-    if !app.linked_prs_loaded.contains(&item.id) {
+    if lookup_failed.is_none() && !app.linked_prs_loaded.contains(&item.id) {
         app.set_status("Linked PRs are still loading - try again in a moment");
         return;
     }
@@ -578,8 +584,13 @@ pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
     let item_id = item.id.clone();
     let branches = app.config.deploy_branches.clone();
     app.set_status(&format!(
-        "Checking {} merged PR(s) against {}...",
+        "Checking {} merged PR(s){} against {}...",
         prs.len(),
+        if lookup_failed.is_some() {
+            " from the last list loaded"
+        } else {
+            ""
+        },
         branches
             .iter()
             .map(|b| b.branch.as_str())
@@ -621,6 +632,65 @@ pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
             results,
         });
     });
+}
+
+/// What a deploy check could not read: a status-bar line and a popup text,
+/// or `None` when every lookup answered.
+///
+/// Grouped by reason - when GitHub is down every PR x branch fails the same
+/// way, and listing each one buried the reason under the commands.
+pub fn deploy_failure_report(
+    label: &str,
+    results: &[(String, Vec<(String, gh::issue::DeployState)>)],
+    prs: &[crate::models::item::LinkedPr],
+) -> Option<(String, String)> {
+    let total: usize = results.iter().map(|(_, states)| states.len()).sum();
+    let mut failed = 0usize;
+    // A reason and where it hit: [(PR, [env])].
+    type ReasonGroup = (String, Vec<(String, Vec<String>)>);
+    // In the order first seen.
+    let mut groups: Vec<ReasonGroup> = Vec::new();
+    for (url, states) in results {
+        let pr = prs
+            .iter()
+            .find(|p| &p.url == url)
+            .map(|p| p.short_ref())
+            .unwrap_or_else(|| url.clone());
+        for (env, state) in states {
+            let gh::issue::DeployState::Failed(reason) = state else {
+                continue;
+            };
+            failed += 1;
+            let g = match groups.iter().position(|(r, _)| r == reason) {
+                Some(g) => g,
+                None => {
+                    groups.push((reason.clone(), Vec::new()));
+                    groups.len() - 1
+                }
+            };
+            match groups[g].1.iter_mut().find(|(p, _)| *p == pr) {
+                Some((_, envs)) => envs.push(env.clone()),
+                None => groups[g].1.push((pr.clone(), vec![env.clone()])),
+            }
+        }
+    }
+    let first_reason = groups.first().map(|(r, _)| r.clone())?;
+    let head = format!(
+        "Deploy check {}: {} of {} lookups failed",
+        label, failed, total
+    );
+    let status = format!("{} ({}) - d tries again", head, first_reason);
+    let mut popup = vec![format!("{}.", head)];
+    for (reason, hit) in &groups {
+        popup.push(String::new());
+        popup.push(reason.clone());
+        for (pr, envs) in hit {
+            popup.push(format!("- {}: {}", pr, envs.join(", ")));
+        }
+    }
+    popup.push(String::new());
+    popup.push("They show ! - press d to try again.".to_string());
+    Some((status, popup.join("\n")))
 }
 
 /// Deploy-check every ticket in `item_indices` (`d` in the pick list).
@@ -726,16 +796,21 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
                                             gh::issue::deploy_state(&p.repo, &b.branch, sha),
                                         )
                                     })
-                                    .collect();
+                                    .collect::<Vec<_>>();
                                 (p.url.clone(), states)
                             })
-                            .collect();
+                            .collect::<Vec<_>>();
+                        let check_failed = results.iter().any(|(_, states)| {
+                            states
+                                .iter()
+                                .any(|(_, s)| matches!(s, gh::issue::DeployState::Failed(_)))
+                        });
                         let _ = tx.send(crate::app::ActionResult::DeployChecked {
                             item_id,
                             label,
                             results,
                         });
-                        true
+                        !check_failed
                     })
                 })
                 .collect();
@@ -749,7 +824,7 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
             format!("Deploy check finished for {} ticket(s)", total)
         } else {
             format!(
-                "Deploy check finished for {} ticket(s); {} could not read linked PRs (marked !) - open one and press r to retry",
+                "Deploy check finished for {} ticket(s); {} could not be checked (marked !) - d tries again",
                 total, failed
             )
         }));
@@ -1085,6 +1160,70 @@ mod tests {
             .unwrap_or("")
             .contains("no PRs linked"));
         assert!(app.deploy_check_inflight.is_empty());
+
+        // A failed refresh keeps the last list, and the check goes on with
+        // it: here it gets as far as seeing that nothing is merged.
+        let mut app = app_with_issue(ContentType::Issue);
+        app.items[0].linked_prs = vec![crate::models::item::LinkedPr {
+            repo: "Org/api".into(),
+            number: 7,
+            state: "OPEN".into(),
+            ..Default::default()
+        }];
+        app.linked_prs_loaded.insert("PVTI_1".into());
+        app.linked_prs_failed
+            .insert("PVTI_1".into(), "HTTP 502".into());
+        spawn_deploy_check(&mut app, 0);
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("no linked PR is merged"),
+            "{:?}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn test_deploy_failure_report_groups_by_reason() {
+        use crate::gh::issue::DeployState;
+        let pr = |n: u32| crate::models::item::LinkedPr {
+            repo: "Kinatico/be-compliance-api".into(),
+            number: n,
+            url: format!("https://github.com/Kinatico/be-compliance-api/pull/{}", n),
+            ..Default::default()
+        };
+        let prs = vec![pr(2103), pr(2104)];
+        let down = || DeployState::Failed("error connecting to api.github.com".into());
+        let results = vec![
+            (
+                prs[0].url.clone(),
+                vec![("Dev".into(), down()), ("STG".into(), down())],
+            ),
+            (
+                prs[1].url.clone(),
+                vec![
+                    ("Dev".into(), DeployState::Contained),
+                    ("STG".into(), down()),
+                ],
+            ),
+        ];
+        let (status, popup) = deploy_failure_report("#4019", &results, &prs).expect("failures");
+        assert_eq!(
+            status,
+            "Deploy check #4019: 3 of 4 lookups failed (error connecting to api.github.com) - d tries again"
+        );
+        // The reason once, then where it hit.
+        assert_eq!(popup.matches("error connecting").count(), 1);
+        assert!(popup.contains("- be-compliance-api#2103: Dev, STG"));
+        assert!(popup.contains("- be-compliance-api#2104: STG"));
+
+        // Every lookup answered: nothing to report.
+        let ok = vec![(
+            prs[0].url.clone(),
+            vec![("Dev".into(), DeployState::Missing)],
+        )];
+        assert!(deploy_failure_report("#4019", &ok, &prs).is_none());
     }
 
     use super::*;
