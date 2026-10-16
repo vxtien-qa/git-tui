@@ -109,6 +109,12 @@ pub fn render(f: &mut Frame, app: &App, item_idx: usize, area: Rect) {
             theme::title(),
         )));
         let text_w = (area.width.saturating_sub(10) as usize).max(20);
+        if app.linked_prs_partial.contains(&item.id) {
+            lines.push(Line::from(Span::styled(
+                "    GitHub returned only part of the links: the oldest are not listed",
+                theme::warning(),
+            )));
+        }
         if let Some(e) = lookup_failed {
             let note = format!(
                 "Refresh failed ({}) - this is the last list loaded; r retries",

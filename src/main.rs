@@ -538,6 +538,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "Ticket".to_string());
+                    // Brand new: nothing can link to it yet, so it is not
+                    // "still loading" its PRs.
+                    if has_id {
+                        app.linked_prs_loaded.insert(item.id.clone());
+                    }
                     app.items.push(*item);
                     let new_idx = app.items.len() - 1;
                     // Respect active search filters instead of blindly showing
@@ -585,6 +590,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     results,
                 } => {
                     app.deploy_check_inflight.remove(&item_id);
+                    app.deploy_checked.insert(item_id.clone());
                     let prs = app
                         .items
                         .iter()
@@ -719,12 +725,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 fn apply_linked_prs(
     app: &mut App,
     item_id: &str,
-    result: Result<Vec<crate::models::item::LinkedPr>, String>,
+    result: Result<crate::models::item::LinkedPrs, String>,
 ) {
     match result {
-        Ok(prs) => {
+        Ok(found) => {
             if let Some(item) = app.items.iter_mut().find(|i| i.id == item_id) {
-                item.linked_prs = prs;
+                item.linked_prs = found.prs;
+            }
+            if found.partial {
+                app.linked_prs_partial.insert(item_id.to_string());
+            } else {
+                app.linked_prs_partial.remove(item_id);
             }
             app.linked_prs_loaded.insert(item_id.to_string());
             app.linked_prs_failed.remove(item_id);
@@ -1833,8 +1844,9 @@ mod snapshot_tool {
                     return false;
                 };
                 let repo = app.items[idx].repository.clone().unwrap_or_default();
-                app.items[idx].linked_prs =
-                    crate::gh::issue::linked_prs(&repo, number).expect("linked PRs");
+                app.items[idx].linked_prs = crate::gh::issue::linked_prs(&repo, number)
+                    .expect("linked PRs")
+                    .prs;
                 let id = app.items[idx].id.clone();
                 app.linked_prs_loaded.insert(id);
                 // Run the deploy check inline, as the worker would.

@@ -704,7 +704,6 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
         label: String,
         repo: String,
         number: u32,
-        known: Option<Vec<crate::models::item::LinkedPr>>,
     }
     let mut rows: Vec<Row> = Vec::new();
     for &idx in item_indices {
@@ -714,10 +713,6 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
         let (Some(number), Some(repo)) = (item.number, item.repository.clone()) else {
             continue;
         };
-        // A row whose lookup failed earlier gets a fresh one.
-        let known = (app.linked_prs_loaded.contains(&item.id)
-            && !app.linked_prs_failed.contains_key(&item.id))
-        .then(|| item.linked_prs.clone());
         if item.content_type != crate::models::item::ContentType::Issue
             || app.deploy_check_inflight.contains(&item.id)
         {
@@ -728,7 +723,6 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
             label: format!("#{}", number),
             repo,
             number,
-            known,
         });
     }
     if rows.is_empty() {
@@ -751,38 +745,33 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
                 .map(|r| {
                     let tx = tx.clone();
                     let branches = branches.clone();
-                    let (item_id, label, repo, number, known) = (
-                        r.item_id.clone(),
-                        r.label.clone(),
-                        r.repo.clone(),
-                        r.number,
-                        r.known.clone(),
-                    );
+                    let (item_id, label, repo, number) =
+                        (r.item_id.clone(), r.label.clone(), r.repo.clone(), r.number);
                     std::thread::spawn(move || {
-                        let prs = match known {
-                            Some(prs) => prs,
-                            None => {
-                                let result =
-                                    gh::issue::linked_prs(&repo, number).map_err(|e| e.to_string());
-                                let ok = result.is_ok();
-                                let prs = result.clone().unwrap_or_default();
-                                let _ = tx.send(crate::app::ActionResult::LinkedPrsFetched {
-                                    item_id: item_id.clone(),
-                                    result,
-                                });
-                                if !ok {
-                                    // Recorded as failed by LinkedPrsFetched; the
-                                    // row shows ! and the summary counts it.
-                                    let _ = tx.send(crate::app::ActionResult::DeployChecked {
-                                        item_id,
-                                        label,
-                                        results: Vec::new(),
-                                    });
-                                    return false;
-                                }
-                                prs
-                            }
-                        };
+                        // Read fresh every time: the list from when a ticket
+                        // was last opened can predate the fix PR, and a ✓
+                        // built on it would vouch for code that is not on UAT.
+                        let result =
+                            gh::issue::linked_prs(&repo, number).map_err(|e| e.to_string());
+                        let prs = result
+                            .as_ref()
+                            .map(|found| found.prs.clone())
+                            .unwrap_or_default();
+                        let ok = result.is_ok();
+                        let _ = tx.send(crate::app::ActionResult::LinkedPrsFetched {
+                            item_id: item_id.clone(),
+                            result,
+                        });
+                        if !ok {
+                            // Recorded as failed by LinkedPrsFetched; the
+                            // row shows ! and the summary counts it.
+                            let _ = tx.send(crate::app::ActionResult::DeployChecked {
+                                item_id,
+                                label,
+                                results: Vec::new(),
+                            });
+                            return false;
+                        }
                         let results = prs
                             .iter()
                             .filter(|p| p.is_merged())

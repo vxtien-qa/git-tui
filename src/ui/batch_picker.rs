@@ -30,10 +30,11 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
     // What the deploy check (d) said about UAT, per row, once it ran.
     let uat_mark = |item: Option<&crate::models::item::Item>| -> String {
         let lookup_failed = item.is_some_and(|i| app.linked_prs_failed.contains_key(&i.id));
-        // A result on screen wins over a later failed refresh of the PRs.
+        // `d` here reads every PR list fresh: when that read failed, an
+        // older result is not vouched for any more.
         match item.and_then(|i| app.uat_deploy_state(i)) {
+            _ if lookup_failed => "!".to_string(),
             Some(state) => super::utils::deploy_mark(&state).0,
-            None if lookup_failed => "!".to_string(),
             None if item.is_some_and(|i| app.deploy_check_inflight.contains(&i.id)) => {
                 theme::icon_spinner().to_string()
             }
@@ -53,7 +54,7 @@ pub fn render(f: &mut Frame, app: &App, kind: BatchKind, area: Rect) {
     let legend: Vec<String> = if has_result {
         super::utils::word_wrap(
             &format!(
-                "UAT: {} on UAT · {} not on UAT · ? not in its history (maybe cherry-picked) · - not found · ! check failed",
+                "UAT: {} on UAT · {} not on UAT · ? not in its history (maybe cherry-picked), or a PR still open · - no PR to check, or not found · ! check failed",
                 theme::icon_ok(),
                 theme::icon_fail()
             ),

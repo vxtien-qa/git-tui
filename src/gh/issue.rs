@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::client;
-use crate::models::item::LinkedPr;
+use crate::models::item::{LinkedPr, LinkedPrs};
 
 /// Create an issue in a repo.
 pub fn create(
@@ -101,7 +101,7 @@ pub fn view(repo: &str, issue_number: u32) -> Result<String> {
 /// deploy-branch PRs show up. Connection events are left out on purpose: a
 /// hand-linked PR is already in the first list, and an event for one that was
 /// later unlinked would bring it back.
-pub fn linked_prs(repo: &str, number: u32) -> Result<Vec<LinkedPr>> {
+pub fn linked_prs(repo: &str, number: u32) -> Result<LinkedPrs> {
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("repository '{}' is not owner/name", repo))?;
@@ -117,7 +117,21 @@ pub fn linked_prs(repo: &str, number: u32) -> Result<Vec<LinkedPr>> {
         "-F",
         &format!("number={}", number),
     ])?;
-    parse_linked_prs(&json)
+    Ok(LinkedPrs {
+        prs: parse_linked_prs(&json)?,
+        partial: parse_linked_prs_partial(&json),
+    })
+}
+
+/// Whether `LINKED_PRS_QUERY` came back with more links than it read: more
+/// closing PRs than its first page, or references older than its last one.
+pub fn parse_linked_prs_partial(json: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    let issue = &v["data"]["repository"]["issue"];
+    issue["closedByPullRequestsReferences"]["pageInfo"]["hasNextPage"] == true
+        || issue["timelineItems"]["pageInfo"]["hasPreviousPage"] == true
 }
 
 const LINKED_PRS_QUERY: &str = r#"
@@ -125,9 +139,11 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       closedByPullRequestsReferences(first: 25, includeClosedPrs: true) {
+        pageInfo { hasNextPage }
         nodes { ...pr }
       }
       timelineItems(last: 100, itemTypes: [CROSS_REFERENCED_EVENT]) {
+        pageInfo { hasPreviousPage }
         nodes {
           ... on CrossReferencedEvent { source { ... on PullRequest { ...pr } } }
         }
@@ -419,6 +435,18 @@ mod tests {
             ),
             DeployState::Failed("gh: Bad credentials (HTTP 401)".to_string())
         );
+    }
+
+    #[test]
+    fn test_linked_prs_partial_when_github_holds_links_back() {
+        let full = r#"{"data":{"repository":{"issue":{
+            "closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false},"nodes":[]},
+            "timelineItems":{"pageInfo":{"hasPreviousPage":false},"nodes":[]}}}}}"#;
+        assert!(!parse_linked_prs_partial(full));
+        let older = full.replace(r#""hasPreviousPage":false"#, r#""hasPreviousPage":true"#);
+        assert!(parse_linked_prs_partial(&older));
+        let more = full.replace(r#""hasNextPage":false"#, r#""hasNextPage":true"#);
+        assert!(parse_linked_prs_partial(&more));
     }
 
     #[test]

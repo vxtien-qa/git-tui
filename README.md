@@ -169,8 +169,10 @@ not, and `?` that the commit is not in the branch's history but the change may
 have arrived by cherry-pick, so it is never read as "not deployed". `-` means
 GitHub found no such branch, commit or repository, and `!` that the check
 failed. The list's UAT column is `✓` only when every open or merged linked PR
-is merged and on UAT; a key to the marks shows under the list once a check has
-run. A ticket only shows the PRs GitHub links to it; one whose PR was never
+is merged and on UAT (a row with only open PRs shows `?`, one with no PR `-`);
+a key to the marks shows under the list once a check has run. `d` in the list
+reads each ticket's PR list fresh, so a fix PR merged since the ticket was last
+opened is counted. A ticket only shows the PRs GitHub links to it; one whose PR was never
 linked shows "none linked on GitHub". If a later refresh of the PR list fails,
 the last list stays, marked as such, and `d` checks that one.
 

@@ -348,12 +348,12 @@ pub enum ActionResult {
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         /// `None` when there is nothing to look up (a pull request card);
         /// `Err` when the lookup failed, which keeps what was shown.
-        linked_prs: Option<Result<Vec<crate::models::item::LinkedPr>, String>>,
+        linked_prs: Option<Result<crate::models::item::LinkedPrs, String>>,
     },
     /// Linked PRs read outside the detail fetch (the pick list's `d`).
     LinkedPrsFetched {
         item_id: String,
-        result: Result<Vec<crate::models::item::LinkedPr>, String>,
+        result: Result<crate::models::item::LinkedPrs, String>,
     },
     /// A ticket's Sprint field was written on GitHub.
     SprintChanged {
@@ -554,6 +554,11 @@ pub struct App {
     /// Items whose linked-PR lookup failed, with the error, until a reload
     /// succeeds.
     pub linked_prs_failed: std::collections::HashMap<String, String>,
+    /// Items whose last lookup GitHub cut short (`LinkedPrs::partial`).
+    pub linked_prs_partial: std::collections::HashSet<String>,
+    /// Items a deploy check has answered for this session, so a row with
+    /// nothing to compare still shows that the check ran.
+    pub deploy_checked: std::collections::HashSet<String>,
     /// Deploy check results by PR URL: (environment, state) in
     /// `config.deploy_branches` order. Kept for the session, across syncs.
     pub deploy_checks:
@@ -680,6 +685,8 @@ impl App {
             detail_fetch_inflight: std::collections::HashSet::new(),
             linked_prs_loaded: std::collections::HashSet::new(),
             linked_prs_failed: std::collections::HashMap::new(),
+            linked_prs_partial: std::collections::HashSet::new(),
+            deploy_checked: std::collections::HashSet::new(),
             batch_rows: Vec::new(),
             batch_cursor: 0,
             deploy_checks: std::collections::HashMap::new(),
@@ -913,8 +920,20 @@ impl App {
             })
             .collect();
         if states.iter().all(|s| s.is_none()) {
-            return None; // never checked
+            if !self.deploy_checked.contains(&item.id) {
+                return None; // never checked
+            }
+            // Checked, with nothing to compare: no PR linked at all (-), or
+            // only open ones, whose code cannot be on UAT yet (?).
+            return Some(if counted.is_empty() {
+                DeployState::NotFound
+            } else {
+                DeployState::Unknown
+            });
         }
+        // GitHub held some links back: whatever the rest say, this list is
+        // not the whole change.
+        let partial = self.linked_prs_partial.contains(&item.id);
         let is = |want: &DeployState| states.contains(&Some(want));
         Some(if is(&DeployState::Missing) {
             DeployState::Missing
@@ -923,7 +942,7 @@ impl App {
             .find(|s| matches!(s, Some(DeployState::Failed(_))))
         {
             (*failed).clone()
-        } else if states.iter().all(|s| *s == Some(&DeployState::Contained)) {
+        } else if !partial && states.iter().all(|s| *s == Some(&DeployState::Contained)) {
             DeployState::Contained
         } else if states.iter().all(|s| *s == Some(&DeployState::NotFound)) {
             // No UAT branch where any of the PRs live: the same - as Item Detail.
@@ -2429,6 +2448,49 @@ mod tests {
             app.deploy_summary(&item),
             "Dev: 2/2 in · STG: 1/2 in, 1 ? · UAT: 1/2 in, 1 ? · Prod: 1/2 in"
         );
+    }
+
+    #[test]
+    fn test_uat_deploy_state_after_a_check_with_nothing_to_compare() {
+        use crate::gh::issue::DeployState::*;
+        use crate::models::item::LinkedPr;
+        let mut app = App::new();
+        app.config.deploy_branches = crate::config::Config::default().deploy_branches;
+        let mut item = Item {
+            id: "PVTI_1".into(),
+            linked_prs: vec![LinkedPr {
+                url: "open".into(),
+                state: "OPEN".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(app.uat_deploy_state(&item), None, "never checked");
+        // Checked: an open PR's code cannot be on UAT yet.
+        app.deploy_checked.insert("PVTI_1".into());
+        assert_eq!(app.uat_deploy_state(&item), Some(Unknown));
+        // Checked, nothing linked at all.
+        item.linked_prs.clear();
+        assert_eq!(app.uat_deploy_state(&item), Some(NotFound));
+
+        // Every PR read is on UAT, but GitHub held some links back.
+        item.linked_prs = vec![LinkedPr {
+            url: "m".into(),
+            state: "MERGED".into(),
+            ..Default::default()
+        }];
+        app.deploy_checks.insert(
+            "m".into(),
+            vec![
+                ("Dev".into(), Contained),
+                ("STG".into(), Contained),
+                ("UAT".into(), Contained),
+                ("Prod".into(), Contained),
+            ],
+        );
+        assert_eq!(app.uat_deploy_state(&item), Some(Contained));
+        app.linked_prs_partial.insert("PVTI_1".into());
+        assert_eq!(app.uat_deploy_state(&item), Some(Unknown));
     }
 
     #[test]

@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 
 use super::status::Status;
 
+/// A ticket's linked PRs as read from GitHub. `partial` when GitHub held some
+/// back (more links than one page returns): the list is then not the whole
+/// set, and no verdict built on it can be "all on UAT".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LinkedPrs {
+    pub prs: Vec<LinkedPr>,
+    pub partial: bool,
+}
+
 /// A pull request linked to an issue: one that closes it ("Fixes #n"), one
 /// that mentions it, or one linked by hand in the Development panel.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
