@@ -31,9 +31,9 @@ pub fn is_epic(item: &Item) -> bool {
 /// Longest epic name a report line will carry.
 const EPIC_NAME_MAX: usize = 32;
 
-/// Depth cap for the parent walk - a cycle on the board would otherwise hang
-/// the report.
-const MAX_PARENT_HOPS: usize = 4;
+/// Depth cap for the parent walk. A loop is caught by the visited set; this
+/// only bounds a pathological chain.
+const MAX_PARENT_HOPS: usize = 32;
 
 /// Search filter value for "no parent at all".
 pub const NO_PARENT: &str = "none";
@@ -71,10 +71,9 @@ pub enum Root<'a> {
     Epic(&'a Item),
     /// The chain ends at a ticket on the board that is not an epic.
     Ticket(&'a Item),
-    /// The chain leaves the board: sync stores each parent's number and
-    /// title, so the first parent that is not a project item can still be
-    /// named. Parents are looked up in the child's repository, so that is
-    /// the off-board parent's repository too.
+    /// The chain leaves the board: sync stores each parent's number, title
+    /// and repository, so the first parent that is not a project item can
+    /// still be named.
     OffBoard {
         number: u32,
         title: Option<String>,
@@ -117,12 +116,15 @@ impl Root<'_> {
         }
     }
 
-    /// Grouping key. Board items by project item id (issue numbers repeat
-    /// across the project's repositories), off-board parents by number.
+    /// Grouping key. Board items by project item id, off-board parents by
+    /// repository and number: issue numbers repeat across the project's
+    /// repositories.
     pub fn key(&self) -> String {
         match self {
             Root::Epic(i) | Root::Ticket(i) => format!("item:{}", i.id),
-            Root::OffBoard { number, .. } => format!("off:{}", number),
+            Root::OffBoard { number, repo, .. } => {
+                format!("off:{}#{}", repo.as_deref().unwrap_or(""), number)
+            }
             Root::None => "none".to_string(),
         }
     }
@@ -178,13 +180,20 @@ fn walk<'a>(item: &Item, find: impl Fn(u32, Option<&str>) -> Option<&'a Item>) -
         return Root::None;
     };
     let mut title = item.parent_title.clone();
-    let repo = item.repository.as_deref();
+    // Each parent lives in its own repository (synced); an old cache without
+    // it falls back to the child's.
+    let mut repo = item.parent_repo.clone().or_else(|| item.repository.clone());
+    let mut seen: Vec<(Option<String>, u32)> = Vec::new();
     for _ in 0..MAX_PARENT_HOPS {
-        let Some(parent) = find(number, repo) else {
+        if seen.contains(&(repo.clone(), number)) {
+            break; // a loop on the board
+        }
+        seen.push((repo.clone(), number));
+        let Some(parent) = find(number, repo.as_deref()) else {
             return Root::OffBoard {
                 number,
                 title,
-                repo: repo.map(str::to_string),
+                repo,
             };
         };
         if is_epic(parent) {
@@ -194,11 +203,15 @@ fn walk<'a>(item: &Item, find: impl Fn(u32, Option<&str>) -> Option<&'a Item>) -
             Some(next) => {
                 number = next;
                 title = parent.parent_title.clone();
+                repo = parent
+                    .parent_repo
+                    .clone()
+                    .or_else(|| parent.repository.clone());
             }
             None => return Root::Ticket(parent),
         }
     }
-    // Deeper than any real chain: treat as a cycle and give up.
+    // A loop, or deeper than any real chain: no root to name.
     Root::None
 }
 
@@ -281,6 +294,9 @@ pub fn root_filter_options(items: &[Item]) -> Vec<(String, String)> {
             .cmp(&a.1 .2)
             .then(a.1 .1.cmp(&b.1 .1))
             .then(a.1 .0.cmp(&b.1 .0))
+            // Same label (one number in two repositories): the value decides,
+            // or the screen and the key handler could disagree on the order.
+            .then(a.0.cmp(&b.0))
     });
     let mut out: Vec<(String, String)> = options
         .into_iter()
@@ -309,6 +325,65 @@ mod tests {
     }
 
     const REPO: &str = "acme/board";
+
+    #[test]
+    fn test_parent_in_another_repository_is_found_there() {
+        let epic = issue(REPO, 1169, "[Epic] Pre-employment", None);
+        // The same number in the code repo: an unrelated ticket.
+        let decoy = issue("acme/api", 1169, "Unrelated", None);
+        let mut child = issue("acme/api", 1388, "API work", Some(1169));
+        child.parent_repo = Some(REPO.to_string());
+        let items = vec![epic, decoy, child];
+        let root = resolve_root(&items[2], &items);
+        assert!(matches!(root, Root::Epic(i) if i.id == items[0].id));
+        assert_eq!(RootIndex::new(&items).resolve(&items[2]).key(), root.key());
+        // A cache from before parent_repo: the child's repository, as before.
+        let mut old = items[2].clone();
+        old.parent_repo = None;
+        assert!(matches!(resolve_root(&old, &items), Root::Ticket(i) if i.id == items[1].id));
+    }
+
+    #[test]
+    fn test_deep_chains_reach_their_epic_and_loops_end() {
+        // bug -> subtask -> task -> story -> feature -> epic: five hops.
+        let mut items = vec![issue(REPO, 1, "[Epic] Billing", None)];
+        for n in 2..=6 {
+            items.push(issue(REPO, n, "step", Some(n - 1)));
+        }
+        let leaf = items[5].clone();
+        assert!(matches!(resolve_root(&leaf, &items), Root::Epic(i) if i.number == Some(1)));
+
+        // 10 -> 11 -> 10: a loop names no root, and returns.
+        let looped = vec![
+            issue(REPO, 10, "a", Some(11)),
+            issue(REPO, 11, "b", Some(10)),
+        ];
+        assert!(matches!(resolve_root(&looped[0], &looped), Root::None));
+    }
+
+    #[test]
+    fn test_off_board_parents_group_by_repository() {
+        let web = issue("acme/web", 10, "web", Some(120));
+        let api = issue("acme/api", 11, "api", Some(120));
+        let items = vec![web, api];
+        let a = resolve_root(&items[0], &items).key();
+        let b = resolve_root(&items[1], &items).key();
+        assert_ne!(a, b, "#120 in two repositories is two roots");
+    }
+
+    #[test]
+    fn test_root_options_order_is_stable_on_full_ties() {
+        // Off-board #139 in three repositories: same label, same count.
+        let items: Vec<Item> = ["acme/a", "acme/b", "acme/c"]
+            .iter()
+            .enumerate()
+            .map(|(i, repo)| issue(repo, 200 + i as u32, "t", Some(139)))
+            .collect();
+        let first = root_filter_options(&items);
+        for _ in 0..20 {
+            assert_eq!(root_filter_options(&items), first);
+        }
+    }
 
     #[test]
     fn test_index_resolves_like_the_scan() {

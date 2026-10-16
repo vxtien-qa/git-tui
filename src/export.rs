@@ -2215,11 +2215,58 @@ fn list_label(item: &Item) -> String {
 /// link early, and GitHub drops `<Activity>` as an unknown HTML tag (checked
 /// through its markdown API, 2026-10-14). Backslash escapes keep both.
 fn escape_md_link_text(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
-        .replace('<', "\\<")
-        .replace('>', "\\>")
+    let plain = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('[', "\\[")
+            .replace(']', "\\]")
+            .replace('<', "\\<")
+            .replace('>', "\\>")
+            .replace('`', "\\`")
+    };
+    // Inside a `code span` Markdown takes every character literally, so an
+    // escape there would show its backslash; everything else is escaped.
+    // Spans are matched the way CommonMark does it, not guessed from how many
+    // backticks there are: a run of N backticks opens a span only when a later
+    // run of exactly N closes it. A guess that disagreed with the renderer
+    // left `](url)` unescaped outside any span, and a title could repoint its
+    // own link. An unmatched run is escaped like any other text.
+    let chars: Vec<char> = s.chars().collect();
+    let run_at = |i: usize| chars[i..].iter().take_while(|&&c| c == '`').count();
+    let mut out = String::new();
+    let mut text_start = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '`' {
+            i += 1;
+            continue;
+        }
+        let open = run_at(i);
+        let mut j = i + open;
+        let mut close = None;
+        while j < chars.len() {
+            if chars[j] == '`' {
+                let run = run_at(j);
+                if run == open {
+                    close = Some(j + run);
+                    break;
+                }
+                j += run;
+            } else {
+                j += 1;
+            }
+        }
+        match close {
+            Some(end) => {
+                out.push_str(&plain(&chars[text_start..i].iter().collect::<String>()));
+                out.extend(&chars[i..end]);
+                i = end;
+                text_start = end;
+            }
+            None => i += open,
+        }
+    }
+    out.push_str(&plain(&chars[text_start..].iter().collect::<String>()));
+    out
 }
 
 fn escape_html(s: &str) -> String {
@@ -2327,6 +2374,28 @@ pub fn read_from_clipboard() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_markdown_link_text_leaves_code_spans_alone() {
+        // Escapes inside `...` show their backslash on GitHub.
+        assert_eq!(
+            escape_md_link_text("Crash in `<Select>` dropdown [x] a<b>"),
+            "Crash in `<Select>` dropdown \\[x\\] a\\<b\\>"
+        );
+        // An unmatched backtick is plain text, escaped with the rest.
+        assert_eq!(escape_md_link_text("it's `odd <x>"), "it's \\`odd \\<x\\>");
+        // Three backticks never closed, then one: no span at all, so the
+        // `](url)` after them must stay escaped (it used to repoint the link).
+        assert_eq!(
+            escape_md_link_text("a ``` ](https://evil.example) <b> `"),
+            "a \\`\\`\\` \\](https://evil.example) \\<b\\> \\`"
+        );
+        // Runs of different lengths: `` closes ``, a lone ` inside is code.
+        assert_eq!(
+            escape_md_link_text("x ``a ` b`` [y]"),
+            "x ``a ` b`` \\[y\\]"
+        );
+    }
     use crate::models::root::{epic_short_name, is_epic};
     use chrono::{NaiveDate, TimeZone};
 

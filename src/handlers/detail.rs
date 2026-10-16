@@ -379,10 +379,11 @@ pub fn handle_detail(app: &mut App, key: KeyCode, item_idx: usize) {
         }
         // Jump to the sub-issues parent when it's on the board
         KeyCode::Char('o') => {
-            let target = app
-                .items
-                .get(item_idx)
-                .and_then(|item| item.parent_number.map(|pn| (pn, item.repository.clone())));
+            let target = app.items.get(item_idx).and_then(|item| {
+                // The parent's own repository; older caches lack it.
+                let repo = item.parent_repo.clone().or_else(|| item.repository.clone());
+                item.parent_number.map(|pn| (pn, repo))
+            });
             match target {
                 Some((pn, repo)) => {
                     if let Some(pidx) = app

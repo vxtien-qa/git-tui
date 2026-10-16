@@ -81,8 +81,11 @@ pub fn handle_search(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                 let is_exclude = filter.contains(&not_opt);
 
                 if is_include {
-                    filter.retain(|x| x != &opt);
-                    filter.push(not_opt);
+                    // In place: a value the board no longer offers is listed
+                    // in this order, so moving it would move the cursor too.
+                    if let Some(slot) = filter.iter_mut().find(|x| **x == opt) {
+                        *slot = not_opt;
+                    }
                 } else if is_exclude {
                     filter.retain(|x| x != &not_opt);
                 } else {
@@ -291,4 +294,36 @@ pub fn get_filter_option_at(app: &App, field_idx: usize, cursor_pos: usize) -> O
         .into_iter()
         .nth(cursor_pos)
         .map(|(value, _)| value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_excluding_a_value_keeps_its_place_under_the_cursor() {
+        let mut app = App::new();
+        // Two epics with no open work any more, from a saved filter: listed
+        // only because they are selected, in the filter's order.
+        *app.search_filter_mut(6) = vec!["acme/b#10".to_string(), "acme/b#20".to_string()];
+        app.search_field_idx = 6;
+        let at = |app: &App| get_filter_option_at(app, 6, app.filter_cursor[5]);
+        app.filter_cursor[5] = app
+            .search_filter_options(6)
+            .iter()
+            .position(|(v, _)| v == "acme/b#10")
+            .expect("listed");
+
+        handle_search(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(app.search_filter(6), &vec!["!acme/b#10", "acme/b#20"]);
+        assert_eq!(
+            at(&app).as_deref(),
+            Some("acme/b#10"),
+            "cursor stays on #10"
+        );
+
+        // The next Space switches #10 off, not #20.
+        handle_search(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(app.search_filter(6), &vec!["acme/b#20"]);
+    }
 }

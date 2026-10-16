@@ -96,6 +96,11 @@ pub struct Item {
     pub parent_number: Option<u32>,
     #[serde(default)]
     pub parent_title: Option<String>,
+    /// The parent's repository: a code-repo ticket often hangs off an epic in
+    /// the board repo. `None` from caches written before it was synced; the
+    /// child's own repository is assumed then.
+    #[serde(default)]
+    pub parent_repo: Option<String>,
     /// Whether this item is selected for batch operations
     #[serde(skip)]
     pub selected: bool,

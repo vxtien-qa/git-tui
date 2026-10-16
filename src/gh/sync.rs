@@ -88,6 +88,7 @@ struct IssueContent {
 struct ParentInfo {
     number: u32,
     title: String,
+    repository: Option<RepoInfo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,7 +175,7 @@ query($owner: String!, $number: Int!, $cursor: String) {
               assignees(first: 10) { nodes { login } }
               labels(first: 30) { nodes { name } }
               repository { nameWithOwner }
-              parent { number title }
+              parent { number title repository { nameWithOwner } }
             }
             ... on DraftIssue {
               title
@@ -283,7 +284,9 @@ fn node_to_item(node: ProjectItemNode) -> Item {
                 .updated_at
                 .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
                 .map(|dt| dt.with_timezone(&Utc)),
-            issue.parent.map(|p| (p.number, p.title)),
+            issue
+                .parent
+                .map(|p| (p.number, p.title, p.repository.map(|r| r.name_with_owner))),
         ),
         Some(ContentNode::PullRequest(pr)) => (
             Some(pr.id),
@@ -349,8 +352,9 @@ fn node_to_item(node: ProjectItemNode) -> Item {
         status_history: None,
         comment_history: None,
         label_history: None,
-        parent_number: parent.as_ref().map(|(n, _)| *n),
-        parent_title: parent.map(|(_, t)| t),
+        parent_number: parent.as_ref().map(|(n, _, _)| *n),
+        parent_title: parent.as_ref().map(|(_, t, _)| t.clone()),
+        parent_repo: parent.and_then(|(_, _, r)| r),
         selected: false,
     }
 }

@@ -306,26 +306,28 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                                     }
                                 }
                             }
-                            for (i, value) in cursor_values.into_iter().enumerate() {
-                                let Some(value) = value else {
-                                    continue;
-                                };
-                                if let Some(pos) = app
-                                    .search_filter_options(i + 1)
-                                    .iter()
-                                    .position(|(v, _)| *v == value)
-                                {
-                                    if let Some(c) = app.filter_cursor.get_mut(i) {
-                                        *c = pos;
-                                    }
-                                }
-                            }
                             handlers::helpers::remap_screen_indices(app, &old_items);
                             // Cache writes happen in the refresh worker thread -
                             // serializing 1000+ items inline here caused a
                             // visible hitch every auto-refresh.
 
                             app.fields = fields;
+
+                            // Filter cursors back on their values, now that the
+                            // options (the Sprint row reads the fields) are new.
+                            // A value that is gone leaves the cursor on the
+                            // nearest option rather than past the end.
+                            for (i, value) in cursor_values.into_iter().enumerate() {
+                                let options = app.search_filter_options(i + 1);
+                                let found = value.and_then(|value| {
+                                    options.iter().position(|(v, _)| *v == value)
+                                });
+                                if let Some(c) = app.filter_cursor.get_mut(i) {
+                                    *c = found.unwrap_or_else(|| {
+                                        (*c).min(options.len().saturating_sub(1))
+                                    });
+                                }
+                            }
 
                             if let Some(pid) = project_id {
                                 app.project_id = Some(pid);
