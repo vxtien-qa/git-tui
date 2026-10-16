@@ -328,6 +328,20 @@ UI bugs found on the way: form footers dropping `Ctrl+S:Submit` beside the
 sidebar, Help scrolling into blank pages, the My Tasks cursor left off screen
 by a resize, and the menu's queue counts out of line.
 
+## Logic review (2026-10-16)
+
+Four reviews (write flows, Search, deploy check, reports and Slack) plus the
+write flows driven end to end with a fake-write `gh` and a local Slack
+catcher. Fixed in checkpoints 18 to 22: the batch Slack cc naming people of
+tickets that did not go through; statuses re-sent after each write so a
+mid-batch sync cannot undo them; the pick list's `d` reading PR lists fresh;
+partial PR lists never giving ✓; sub-issue parents looked up in their own
+repository; the Markdown copy's code spans matched as CommonMark does (a
+guessed match let a title repoint its link); Issues found across sprints;
+and the deploy check counting a PR's branch head, because be-compliance-api
+promotes fixes through per-environment branches and the develop merge commit
+never reaches staging.
+
 ## Checkpoints
 
 Work lands as one commit per step on `feat/v3.3.0-uat-cycle-board-query`,
@@ -356,6 +370,11 @@ the footers, so the QA can stop at any tag and test by hand. To drop a step:
 | `cp/15-final-fixes` | Findings of the final review |
 | `cp/16-ui-sweep` | UI sweep fixes for the new flows |
 | `cp/17-old-ui-bugs` | Older UI bugs found in the sweep |
+| `cp/18-write-flows` | Write-flow fixes from the logic review |
+| `cp/19-deploy-check` | Deploy check and linked-PR fixes |
+| `cp/20-search-roots` | Search, parent repository, Markdown escaping |
+| `cp/21-reports` | Standup, Done line, Slack text |
+| `cp/22-deploy-head` | Deploy check reads the PR's branch head too |
 
 ## Release
 

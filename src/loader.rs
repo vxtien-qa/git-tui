@@ -616,15 +616,9 @@ pub fn spawn_deploy_check(app: &mut App, item_idx: usize) {
                 .map(|pr| {
                     let branches = branches.clone();
                     std::thread::spawn(move || {
-                        let sha = pr.merge_commit.clone().unwrap_or_default();
                         let states = branches
                             .iter()
-                            .map(|b| {
-                                (
-                                    b.env.clone(),
-                                    gh::issue::deploy_state(&pr.repo, &b.branch, &sha),
-                                )
-                            })
+                            .map(|b| (b.env.clone(), gh::issue::pr_deploy_state(&pr, &b.branch)))
                             .collect();
                         (pr.url, states)
                     })
@@ -780,16 +774,12 @@ pub fn spawn_deploy_check_rows(app: &mut App, item_indices: &[usize]) {
                         }
                         let results = prs
                             .iter()
-                            .filter(|p| p.is_merged())
-                            .filter_map(|p| p.merge_commit.as_ref().map(|sha| (p, sha)))
-                            .map(|(p, sha)| {
+                            .filter(|p| p.is_merged() && p.merge_commit.is_some())
+                            .map(|p| {
                                 let states = branches
                                     .iter()
                                     .map(|b| {
-                                        (
-                                            b.env.clone(),
-                                            gh::issue::deploy_state(&p.repo, &b.branch, sha),
-                                        )
+                                        (b.env.clone(), gh::issue::pr_deploy_state(p, &b.branch))
                                     })
                                     .collect::<Vec<_>>();
                                 (p.url.clone(), states)

@@ -152,7 +152,7 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }
 fragment pr on PullRequest {
-  number title url state baseRefName
+  number title url state baseRefName headRefOid
   mergeCommit { oid }
   repository { nameWithOwner }
 }
@@ -200,11 +200,49 @@ pub fn parse_linked_prs(json: &str) -> Result<Vec<LinkedPr>> {
             url: url.to_string(),
             state: text("state"),
             merge_commit: node["mergeCommit"]["oid"].as_str().map(str::to_string),
+            head_commit: node["headRefOid"].as_str().map(str::to_string),
             base_ref: text("baseRefName"),
         });
     }
     prs.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.number.cmp(&b.number)));
     Ok(prs)
+}
+
+/// Whether a merged PR's change is on `branch`.
+///
+/// The merge commit is checked first. When the branch does not have it, the
+/// PR's head commit is checked too: a fix promoted by merging its branch into
+/// a per-environment branch (be-compliance-api's `fix/4001-...-staging`) is
+/// on staging with every one of its commits while the develop merge commit
+/// never is. Either one being in the branch means the change is there.
+pub fn pr_deploy_state(pr: &LinkedPr, branch: &str) -> DeployState {
+    let by_merge = pr
+        .merge_commit
+        .as_deref()
+        .map(|sha| deploy_state(&pr.repo, branch, sha));
+    if by_merge == Some(DeployState::Contained) {
+        return DeployState::Contained;
+    }
+    let by_head = pr
+        .head_commit
+        .as_deref()
+        .filter(|head| Some(*head) != pr.merge_commit.as_deref())
+        .map(|head| deploy_state(&pr.repo, branch, head));
+    combine_deploy_states(by_merge, by_head)
+}
+
+/// [`pr_deploy_state`]'s verdict from its two lookups: the head commit can
+/// only turn the answer into ✓; otherwise the merge commit's answer stands.
+pub fn combine_deploy_states(
+    by_merge: Option<DeployState>,
+    by_head: Option<DeployState>,
+) -> DeployState {
+    match (by_merge, by_head) {
+        (_, Some(DeployState::Contained)) => DeployState::Contained,
+        (Some(merge), _) => merge,
+        (None, Some(head)) => head,
+        (None, None) => DeployState::Failed("no commit to check".to_string()),
+    }
 }
 
 /// Whether `sha` is on `branch` of `repo`, as GitHub's compare API sees it.
@@ -362,6 +400,7 @@ mod tests {
           "closedByPullRequestsReferences":{"nodes":[
             {"number":2104,"title":"Second","url":"https://github.com/Kinatico/be-compliance-api/pull/2104",
              "state":"MERGED","baseRefName":"develop","mergeCommit":{"oid":"6628eb44"},
+             "headRefOid":"1faa5620",
              "repository":{"nameWithOwner":"Kinatico/be-compliance-api"}}
           ]},
           "timelineItems":{"nodes":[
@@ -390,6 +429,7 @@ mod tests {
         );
         assert!(prs[0].is_merged());
         assert_eq!(prs[0].merge_commit.as_deref(), Some("745f7db2"));
+        assert_eq!(prs[1].head_commit.as_deref(), Some("1faa5620"));
         assert_eq!(prs[2].merge_commit, None);
         assert_eq!(prs[2].base_ref, "uat");
     }
@@ -435,6 +475,30 @@ mod tests {
             ),
             DeployState::Failed("gh: Bad credentials (HTTP 401)".to_string())
         );
+    }
+
+    #[test]
+    fn test_head_commit_on_the_branch_means_the_change_is_there() {
+        use DeployState::*;
+        // be-compliance-api#2104: the develop merge commit never reaches
+        // staging (diverged), the branch head does (merged via -staging).
+        assert_eq!(
+            combine_deploy_states(Some(Unknown), Some(Contained)),
+            Contained
+        );
+        assert_eq!(
+            combine_deploy_states(Some(Missing), Some(Contained)),
+            Contained
+        );
+        // The head can only turn the answer into ✓.
+        assert_eq!(combine_deploy_states(Some(Unknown), Some(Missing)), Unknown);
+        assert_eq!(combine_deploy_states(Some(Missing), Some(Unknown)), Missing);
+        assert_eq!(combine_deploy_states(Some(Contained), None), Contained);
+        assert_eq!(combine_deploy_states(Some(NotFound), None), NotFound);
+        assert!(matches!(
+            combine_deploy_states(Some(Failed("x".into())), Some(Unknown)),
+            Failed(_)
+        ));
     }
 
     #[test]

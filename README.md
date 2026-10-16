@@ -164,9 +164,11 @@ new bug, which the form files into the sprint running today.
 
 Before moving a ticket to In UAT, `d` in the ticket view checks its linked PRs
 against the deploy branches, and `d` in the Move to In UAT list checks every
-ticket in it. `✓` means the branch has the PR's merge commit, `✗` that it does
-not, and `?` that the commit is not in the branch's history but the change may
-have arrived by cherry-pick, so it is never read as "not deployed". `-` means
+ticket in it. `✓` means the branch has the PR's merge commit, or the last commit
+of the PR's branch (how a fix promoted through a per-environment branch such as
+`fix/x-staging` gets there), `✗` that it does not, and `?` that neither is in
+the branch's history but the change may have arrived by cherry-pick, so it is
+never read as "not deployed". `-` means
 GitHub found no such branch, commit or repository, and `!` that the check
 failed. The list's UAT column is `✓` only when every open or merged linked PR
 is merged and on UAT (a row with only open PRs shows `?`, one with no PR `-`);

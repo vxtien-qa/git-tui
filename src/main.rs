@@ -1517,6 +1517,7 @@ mod render_tests {
                         "MERGED".into()
                     },
                     merge_commit: Some("abc".into()),
+                    head_commit: Some("def".into()),
                     base_ref: "develop".into(),
                 })
                 .collect();
@@ -1855,15 +1856,15 @@ mod snapshot_tool {
                 if std::env::var("SNAP_DEPLOY").is_ok() {
                     let branches = app.config.deploy_branches.clone();
                     for pr in app.items[idx].linked_prs.clone() {
-                        let Some(sha) = pr.merge_commit.clone() else {
+                        if pr.merge_commit.is_none() {
                             continue;
-                        };
+                        }
                         let states = branches
                             .iter()
                             .map(|b| {
                                 (
                                     b.env.clone(),
-                                    crate::gh::issue::deploy_state(&pr.repo, &b.branch, &sha),
+                                    crate::gh::issue::pr_deploy_state(&pr, &b.branch),
                                 )
                             })
                             .collect();

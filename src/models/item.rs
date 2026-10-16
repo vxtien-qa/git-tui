@@ -25,6 +25,11 @@ pub struct LinkedPr {
     pub state: String,
     /// The commit the merge produced, for merged PRs.
     pub merge_commit: Option<String>,
+    /// The last commit of the PR's branch. Teams that promote a fix by
+    /// merging its branch into a per-environment branch (`fix/x-staging`)
+    /// never put the merge commit on staging, but this one gets there.
+    #[serde(default)]
+    pub head_commit: Option<String>,
     /// The branch the PR targets.
     pub base_ref: String,
 }
