@@ -80,7 +80,9 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
             let mut drafts = 0usize;
             let mut moved_away: Vec<String> = Vec::new();
             let mut slack_items: Vec<slack::notifier::ReleaseItem> = Vec::new();
-            let mut slack_devs: Vec<String> = Vec::new();
+            // Each ticket's devs, beside `slack_items`: only the tickets that
+            // really move are cc'd.
+            let mut slack_devs: Vec<Vec<String>> = Vec::new();
             for &idx in indices {
                 let Some(item) = app.items.get(idx) else {
                     continue;
@@ -94,15 +96,25 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                     ));
                     continue;
                 }
+                // The label is the other half of the contract: a dev who
+                // took it off (a rolled-back deploy) means the code is not on
+                // UAT, whatever the pick list said when it opened.
+                if !item
+                    .labels
+                    .iter()
+                    .any(|l| App::label_eq(l, "Ready-for-UAT"))
+                {
+                    moved_away.push(format!(
+                        "#{} no longer has Ready-for-UAT",
+                        item.number.unwrap_or(0)
+                    ));
+                    continue;
+                }
                 let (Some(number), Some(repo)) = (item.number, item.repository.clone()) else {
                     drafts += 1;
                     continue;
                 };
-                for d in item.dev_assignees(&app.current_user) {
-                    if !slack_devs.contains(&d) {
-                        slack_devs.push(d);
-                    }
-                }
+                slack_devs.push(item.dev_assignees(&app.current_user));
                 slack_items.push(slack::notifier::ReleaseItem {
                     number: Some(number),
                     repo: Some(repo.clone()),
@@ -121,7 +133,7 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                         .to_string()
                 } else {
                     format!(
-                        "Move to In UAT: nothing to move - no longer In QA:\n{}",
+                        "Move to In UAT: nothing to move:\n{}",
                         moved_away.join("\n")
                     )
                 });
@@ -179,9 +191,15 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                             item_id: t.item_id.clone(),
                             status: Status::InQA,
                         });
-                        notes.push(format!("failed: #{}: {}", t.number, e));
+                        notes.push(format!("failed: #{}: {}", t.number, gh_reason(&e)));
                         continue;
                     }
+                    // Said again on success: a board sync that landed while
+                    // the batch ran put the old column back on screen.
+                    let _ = tx.send(crate::app::ActionResult::ParentStatusChanged {
+                        item_id: t.item_id.clone(),
+                        status: Status::InUAT,
+                    });
                     let (_, label_failed) = strip_handoff_labels(
                         &tx,
                         &t.item_id,
@@ -197,7 +215,11 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                         ));
                     }
                     if let Err(e) = gh::issue::comment(&t.repo, t.number, &t.comment) {
-                        notes.push(format!("#{}: moved, comment failed ({})", t.number, e));
+                        notes.push(format!(
+                            "#{}: moved, comment failed ({})",
+                            t.number,
+                            gh_reason(&e)
+                        ));
                     }
                     moved.push(i);
                 }
@@ -219,7 +241,7 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                             &slack::notifier::BatchNotice::moved_to_uat(listed.len()),
                             &slack_user,
                             &listed,
-                            &slack_devs,
+                            &cc_for(&slack_devs, &moved),
                             &slack_user_map,
                         ) {
                             Ok(()) => ", ✓ Slack sent".to_string(),
@@ -278,7 +300,9 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
             let mut drafts: Vec<String> = Vec::new();
             let mut moved_away: Vec<String> = Vec::new();
             let mut slack_items: Vec<slack::notifier::ReleaseItem> = Vec::new();
-            let mut slack_devs: Vec<String> = Vec::new();
+            // Each ticket's devs and stack leads, beside `slack_items`: only
+            // the tickets that really pass are cc'd.
+            let mut slack_devs: Vec<Vec<String>> = Vec::new();
 
             for &idx in indices {
                 let Some(item) = app.items.get(idx) else {
@@ -301,17 +325,14 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                 };
                 let devs = item.dev_assignees(&app.current_user);
                 let dev_mentions: Vec<String> = devs.iter().map(|d| format!("@{}", d)).collect();
-                for d in devs {
-                    if !slack_devs.contains(&d) {
-                        slack_devs.push(d);
-                    }
-                }
-                // Leads of every stack in the batch, deduped.
+                // The ticket's devs, then the lead of its stack.
+                let mut people = devs;
                 for l in app.config.get_leads(item.stack.as_deref()) {
-                    if !slack_devs.contains(&l) {
-                        slack_devs.push(l);
+                    if !people.contains(&l) {
+                        people.push(l);
                     }
                 }
+                slack_devs.push(people);
                 slack_items.push(slack::notifier::ReleaseItem {
                     number: Some(number),
                     repo: Some(repo.clone()),
@@ -390,13 +411,19 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                             item_id: t.item_id.clone(),
                             status: Status::InUAT,
                         });
-                        failed.push(format!("#{}: {}", t.number, e));
+                        failed.push(format!("#{}: {}", t.number, gh_reason(&e)));
                         continue;
                     }
+                    // Said again on success: a board sync that landed while
+                    // the batch ran put the old column back on screen.
+                    let _ = tx.send(crate::app::ActionResult::ParentStatusChanged {
+                        item_id: t.item_id.clone(),
+                        status: Status::TechComplete,
+                    });
                     if let Err(e) = gh::issue::comment(&t.repo, t.number, &t.comment) {
                         // Moved but not commented: report it separately, the
                         // status change already happened.
-                        moved_on.push(format!("#{}: comment failed ({})", t.number, e));
+                        moved_on.push(format!("#{}: comment failed ({})", t.number, gh_reason(&e)));
                     }
                     passed.push(i);
                 }
@@ -424,7 +451,7 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                             &notice,
                             &slack_user,
                             &released,
-                            &slack_devs,
+                            &cc_for(&slack_devs, &passed),
                             &slack_user_map,
                         )
                         .is_err()
@@ -1230,8 +1257,11 @@ pub fn execute_confirm_action(app: &mut App, action: &ConfirmAction) {
                                         moving =
                                             format!("Moving back to In Progress and to {}.", m.name)
                                     }
-                                    Err(e) => warnings
-                                        .push(format!("✗ Parent not moved to {}: {}", m.name, e)),
+                                    Err(e) => warnings.push(format!(
+                                        "✗ Parent not moved to {}: {}",
+                                        m.name,
+                                        gh_reason(&e)
+                                    )),
                                 }
                             }
                             let body = if moving.is_empty() {
@@ -1657,7 +1687,13 @@ fn handle_return_action(
         Some(item) => item.id.clone(),
         None => return,
     };
-    // Optimistic local move (reverted via ParentStatusChanged on abort).
+    // Optimistic local move, put back if the write fails: left In Progress,
+    // the guard would refuse a retry until the next sync.
+    let previous = app
+        .items
+        .get(item_idx)
+        .map(|i| i.status.clone())
+        .unwrap_or_default();
     if let Some(item) = app.items.get_mut(item_idx) {
         item.status = Status::InProgress;
     }
@@ -1679,9 +1715,14 @@ fn handle_return_action(
             }
         }
         if let Err(e) = gh::item::edit_field(&item_id, &pid, &fid, &oid) {
+            let _ = tx.send(crate::app::ActionResult::ParentStatusChanged {
+                item_id: item_id.clone(),
+                status: previous.clone(),
+            });
             let _ = tx.send(crate::app::ActionResult::Error(format!(
-                "Return: ✗ Status move failed on GitHub: {}\nThe board will revert on the next sync.",
-                e
+                "Return: ✗ Status move failed on GitHub: {}\nNothing was changed; the ticket stays '{}'.",
+                gh_reason(&e),
+                previous.label()
             )));
             return;
         }
@@ -1711,7 +1752,8 @@ fn handle_return_action(
                 }
                 Err(e) => label_note.push_str(&format!(
                     ", ✗ could not move to {} ({}) - set the Sprint on GitHub",
-                    m.name, e
+                    m.name,
+                    gh_reason(&e)
                 )),
             }
         }
@@ -1964,10 +2006,31 @@ fn strip_handoff_labels(
                 });
                 removed.push(*label);
             }
-            Err(e) => failed.push(format!("{} ({})", label, e)),
+            Err(e) => failed.push(format!("{} ({})", label, gh_reason(&e))),
         }
     }
     (removed, failed)
+}
+
+/// What went wrong, without the `gh` command line in front of it.
+fn gh_reason(e: &anyhow::Error) -> String {
+    gh::client::gh_reason(&e.to_string())
+}
+
+/// Who a batch's Slack message cc's: the people of the tickets that went
+/// through (`done` indexes `per_ticket`), deduped in batch order. A ticket
+/// that was aborted or failed is not in the message, so its people are not
+/// pinged either.
+fn cc_for(per_ticket: &[Vec<String>], done: &[usize]) -> Vec<String> {
+    let mut cc: Vec<String> = Vec::new();
+    for people in done.iter().filter_map(|i| per_ticket.get(*i)) {
+        for p in people {
+            if !cc.contains(p) {
+                cc.push(p.clone());
+            }
+        }
+    }
+    cc
 }
 
 /// Render the outcome of `strip_handoff_labels` as a result-message suffix.
@@ -1992,5 +2055,30 @@ fn comment_with_cc(body: &str, mentions: &str) -> String {
         body.to_string()
     } else {
         format!("{}\ncc {}", body, mentions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cc_only_names_the_tickets_that_went_through() {
+        let per_ticket = vec![
+            vec!["alice".to_string(), "carol".to_string()],
+            vec!["bob".to_string()],
+            vec!["carol".to_string(), "dave".to_string()],
+        ];
+        // The second ticket was aborted: bob is not pinged.
+        assert_eq!(cc_for(&per_ticket, &[0, 2]), vec!["alice", "carol", "dave"]);
+        assert!(cc_for(&per_ticket, &[]).is_empty());
+    }
+
+    #[test]
+    fn test_gh_reason_reads_through_anyhow() {
+        let e = anyhow::anyhow!(
+            "gh issue comment 4382 --repo o/r --body Code is on UAT. failed: HTTP 502"
+        );
+        assert_eq!(gh_reason(&e), "HTTP 502");
     }
 }

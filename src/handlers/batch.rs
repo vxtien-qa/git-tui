@@ -63,12 +63,17 @@ fn confirm_batch(app: &mut App, kind: BatchKind) {
     } else {
         format!("{}, +{} more", nums[..10].join(", "), nums.len() - 10)
     };
+    let notify = &app.config.slack_notify;
     let (message, on_confirm) = match kind {
         BatchKind::VerifyUat => (
             format!(
-                "Regression clear on UAT.\nMove {} ticket(s) to Tech Complete and comment on each:\n{}\nOne 'Ready for release' summary goes to Slack.",
+                "Regression clear on UAT.\nMove {} ticket(s) to Tech Complete and comment on each:\n{}\n{}",
                 indices.len(),
-                preview
+                preview,
+                app.slack_promise(
+                    notify.pass_uat,
+                    "One 'Ready for release' summary goes to Slack."
+                )
             ),
             ConfirmAction::PassUat {
                 indices: indices.clone(),
@@ -77,9 +82,10 @@ fn confirm_batch(app: &mut App, kind: BatchKind) {
         ),
         BatchKind::MoveToUat => (
             format!(
-                "Code is on UAT.\nMove {} ticket(s) to In UAT, remove Ready-for-UAT and comment on each:\n{}\nOne Slack message lists them.",
+                "Code is on UAT.\nMove {} ticket(s) to In UAT, remove Ready-for-UAT and comment on each:\n{}\n{}",
                 indices.len(),
-                preview
+                preview,
+                app.slack_promise(notify.move_to_uat, "One Slack message lists them.")
             ),
             ConfirmAction::MoveToUat {
                 indices: indices.clone(),

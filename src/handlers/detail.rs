@@ -206,12 +206,19 @@ pub fn confirm_qa_action(app: &mut App, key: KeyCode, item_idx: usize) -> bool {
             true
         }
         KeyCode::Char('U') => {
+            let message = format!(
+                "Move to Tech Complete + comment tagging the devs?\n{}",
+                app.slack_promise(
+                    app.config.slack_notify.pass_uat,
+                    "One Slack 'Ready for release' message for this ticket."
+                )
+            );
             guarded_confirm(
                 app,
                 item_idx,
                 PassKind::Uat,
                 "Pass UAT",
-                "Move to Tech Complete + comment tagging the devs?\nOne Slack 'Ready for release' message for this ticket.",
+                &message,
                 ConfirmAction::PassUat {
                     indices: vec![item_idx],
                     bulk: false,

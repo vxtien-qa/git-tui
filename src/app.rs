@@ -1428,6 +1428,18 @@ impl App {
         self.status_message_at = Some(std::time::Instant::now());
     }
 
+    /// The confirm line about Slack: `sentence` when the message will go
+    /// out, otherwise why it will not.
+    pub fn slack_promise(&self, toggle_on: bool, sentence: &str) -> String {
+        if !self.config.is_slack_configured() {
+            "No Slack message: Slack is not set up.".to_string()
+        } else if !toggle_on {
+            "No Slack message: its toggle is off (Settings > n).".to_string()
+        } else {
+            sentence.to_string()
+        }
+    }
+
     /// Drop an "...ing..." progress note once its result popup is up, so the
     /// status bar stops saying "verifying..." under the outcome.
     pub fn clear_progress_status(&mut self) {
