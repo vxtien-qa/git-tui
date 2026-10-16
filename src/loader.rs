@@ -24,7 +24,10 @@ pub fn timeline_cache_key(repo: &str, number: u32) -> String {
 /// fetches them on open - except in the sprint the reports cover: that fetch
 /// is skipped whenever a sync is in flight, and every sync drops the in-memory
 /// histories, so a ticket filed straight into Ready for Dev (#4000, #4001 and
-/// #4004 in Sprint 29) reported "no history" through every refresh.
+/// #4004 in Sprint 29) reported "no history" through every refresh. Tickets
+/// created in the last four days too, whatever their sprint: the standup's
+/// Issues found reads who filed them, and on a Monday Friday's bugs still sit
+/// in the sprint that ended.
 pub fn sync_fetches_timeline(
     item: &crate::models::item::Item,
     report_sprint: Option<&str>,
@@ -32,7 +35,10 @@ pub fn sync_fetches_timeline(
     use crate::models::status::Status;
     match item.status {
         Status::Backlog | Status::ReadyForDev => {
-            report_sprint.is_some() && item.sprint.as_deref() == report_sprint
+            let recent = item
+                .created_at
+                .is_some_and(|c| chrono::Utc::now() - c < chrono::Duration::days(4));
+            recent || (report_sprint.is_some() && item.sprint.as_deref() == report_sprint)
         }
         Status::InProgress
         | Status::Blocked
@@ -1254,6 +1260,12 @@ mod tests {
         assert!(!sync_fetches_timeline(&item, Some("Sprint 30")));
         // No sprint to report on: parked tickets stay lazy, as before.
         assert!(!sync_fetches_timeline(&item, None));
+
+        // Unless just filed: Friday's bug, read on Monday in the next sprint.
+        item.created_at = Some(chrono::Utc::now() - chrono::Duration::days(3));
+        assert!(sync_fetches_timeline(&item, Some("Sprint 30")));
+        item.created_at = Some(chrono::Utc::now() - chrono::Duration::days(9));
+        assert!(!sync_fetches_timeline(&item, Some("Sprint 30")));
     }
 
     #[test]

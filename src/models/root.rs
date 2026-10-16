@@ -102,15 +102,29 @@ impl Root<'_> {
 
     /// Name of the rollup group, with the format's own issue link.
     pub fn group_name(&self, link: &dyn Fn(&Item) -> String) -> String {
+        self.group_name_with(link, &|s: &str| s.to_string())
+    }
+
+    /// [`Root::group_name`] with the name passed through `text`, for formats
+    /// that escape titles (Slack): the link is markup and is left alone.
+    pub fn group_name_with(
+        &self,
+        link: &dyn Fn(&Item) -> String,
+        text: &dyn Fn(&str) -> String,
+    ) -> String {
         match self {
-            Root::Epic(i) | Root::Ticket(i) => format!("{} {}", link(i), epic_short_name(i)),
+            Root::Epic(i) | Root::Ticket(i) => {
+                format!("{} {}", link(i), text(&epic_short_name(i)))
+            }
             Root::OffBoard { number, title, .. } => format!(
                 "#{} {}",
                 number,
-                title
-                    .as_deref()
-                    .map(short_root_name)
-                    .unwrap_or_else(|| "(not on the board)".to_string())
+                text(
+                    &title
+                        .as_deref()
+                        .map(short_root_name)
+                        .unwrap_or_else(|| "(not on the board)".to_string())
+                )
             ),
             Root::None => "No parent".to_string(),
         }

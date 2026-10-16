@@ -374,6 +374,11 @@ fn classify_status_change(previous: Option<&str>, current: Option<&str>) -> Opti
     let curr_lower = curr.to_lowercase();
 
     // ── Definitively NOT QA actions ──
+    // The QA's own Move to In UAT (`I`): code reached UAT, a handoff the QA
+    // made, reported as the move it was. Only the user's own events get here.
+    if curr_lower == "in uat" && prev_lower == "in qa" {
+        return Some(moved(prev, curr));
+    }
     // Dev puts ticket into QA queue, or deploys to UAT and moves it there
     if curr_lower == "in qa - dev" || curr_lower == "in qa" || curr_lower == "in uat" {
         return None;
@@ -568,14 +573,11 @@ fn collect_daily_standup(app: &App) -> DailyStandupData<'_> {
     // 4. Issues found: bugs AND QA-raised enhancements created yesterday or
     // today by the user. Only enhancements carrying the report form's
     // `[ENHANCEMENT]` prefix count - the plain Enhancement label is also on
-    // dev feature work, which QA did not raise.
+    // dev feature work, which QA did not raise. From any sprint, like the
+    // actions above: a bug filed on a sprint's last day sits in that sprint
+    // on the next one's first morning.
     let mut issues_found: Vec<TaggedItem<'_>> = Vec::new();
     for item in &app.items {
-        if app.board_sprint_filter.is_some()
-            && item.sprint.as_deref() != app.board_sprint_filter.as_deref()
-        {
-            continue;
-        }
         let is_bug = item.labels.iter().any(|l| l.to_lowercase().contains("bug"));
         if !is_bug && !is_qa_enhancement_report(item) {
             continue;
@@ -1180,6 +1182,12 @@ fn epic_tag(item: &Item, items: &[Item]) -> String {
     }
 }
 
+/// [`epic_tag`] for a webhook message: root names come from GitHub titles
+/// like ticket titles do, so `&`, `<` and `>` are escaped the same way.
+fn epic_tag_slack(item: &Item, items: &[Item]) -> String {
+    crate::slack::webhook::escape_mrkdwn(&epic_tag(item, items))
+}
+
 /// Resolve a GitHub username to a human-readable display name for copy-paste formats.
 /// Returns `@slack_display` if mapped (e.g. "@Alex Lee"), else `@github_username`.
 /// Use this for md/text reports that are copied and pasted into Slack.
@@ -1246,7 +1254,7 @@ pub fn daily_standup_md(app: &App) -> String {
     }
 
     // Yesterday - what was filed
-    r.push_str("\n### Yesterday - Issues found\n");
+    r.push_str("\n### Issues found - yesterday and today\n");
     if data.issues_found.is_empty() {
         r.push_str("- (none)\n");
     } else {
@@ -1346,7 +1354,7 @@ pub fn daily_standup_text(app: &App) -> String {
     }
 
     // Yesterday - what was filed
-    r.push_str("\nYesterday - Issues found:\n");
+    r.push_str("\nIssues found - yesterday and today:\n");
     if data.issues_found.is_empty() {
         r.push_str("• (None)\n");
     } else {
@@ -1420,7 +1428,7 @@ pub fn daily_standup_slack(app: &App) -> String {
         for a in &data.tested {
             r.push_str(&format!(
                 "• {}{} {} ({}, {}) → {}{}\n",
-                epic_tag(a.item, &app.items),
+                epic_tag_slack(a.item, &app.items),
                 issue_link_slack(a.item, &app.config.owner),
                 title_slack(a.item),
                 a.item.status.label(),
@@ -1439,7 +1447,7 @@ pub fn daily_standup_slack(app: &App) -> String {
         for f in &data.failed {
             r.push_str(&format!(
                 "• {}{} {} ({}, {}) → {}{}\n",
-                epic_tag(f.item, &app.items),
+                epic_tag_slack(f.item, &app.items),
                 issue_link_slack(f.item, &app.config.owner),
                 title_slack(f.item),
                 f.item.status.label(),
@@ -1451,14 +1459,14 @@ pub fn daily_standup_slack(app: &App) -> String {
     }
 
     // Yesterday - what was filed
-    r.push_str("\n*Yesterday - Issues found*\n");
+    r.push_str("\n*Issues found - yesterday and today*\n");
     if data.issues_found.is_empty() {
         r.push_str("• (None)\n");
     } else {
         for t in &data.issues_found {
             r.push_str(&format!(
                 "• {}{} {} ({}, {}){}\n",
-                epic_tag(t.item, &app.items),
+                epic_tag_slack(t.item, &app.items),
                 issue_link_slack(t.item, &app.config.owner),
                 title_slack(t.item),
                 t.item.status.label(),
@@ -1477,7 +1485,7 @@ pub fn daily_standup_slack(app: &App) -> String {
             r.push_str(&format!(
                 "• {} {}{} {} ({}, {})\n",
                 qa_verb(t.item),
-                epic_tag(t.item, &app.items),
+                epic_tag_slack(t.item, &app.items),
                 issue_link_slack(t.item, &app.config.owner),
                 title_slack(t.item),
                 t.item.status.label(),
@@ -1492,7 +1500,7 @@ pub fn daily_standup_slack(app: &App) -> String {
         for t in &data.blocked {
             r.push_str(&format!(
                 "• {}{} {} (Blocked){}\n",
-                epic_tag(t.item, &app.items),
+                epic_tag_slack(t.item, &app.items),
                 issue_link_slack(t.item, &app.config.owner),
                 title_slack(t.item),
                 if t.is_ot { " (OT)" } else { "" },
@@ -1559,18 +1567,38 @@ fn total_open_bugs(d: &SprintReportData) -> usize {
 /// Release are done as far as the sprint goes - the release note ships them -
 /// and the split stays visible for whoever prepares that release.
 fn done_summary(d: &SprintReportData) -> String {
-    let head = format!("Done: {} ({:.0}%)", d.done_count, d.done_pct);
+    done_line(
+        d.done_count,
+        d.done_pct,
+        d.tech_complete_count,
+        d.ready_release_count,
+        d.done_column_count,
+    )
+}
+
+/// [`done_summary`] from its counts.
+fn done_line(
+    done_count: usize,
+    done_pct: f64,
+    tech_complete: usize,
+    ready_release: usize,
+    done_column: usize,
+) -> String {
+    let head = format!("Done: {} ({:.0}%)", done_count, done_pct);
     let mut parts = Vec::new();
-    if d.tech_complete_count > 0 {
-        parts.push(format!("{} Tech Complete", d.tech_complete_count));
+    if tech_complete > 0 {
+        parts.push(format!("{} Tech Complete", tech_complete));
     }
-    if d.ready_release_count > 0 {
-        parts.push(format!("{} Ready for Release", d.ready_release_count));
+    if ready_release > 0 {
+        parts.push(format!("{} Ready for Release", ready_release));
     }
-    if d.done_column_count > 0 {
-        parts.push(format!("{} Done", d.done_column_count));
+    if done_column > 0 {
+        parts.push(format!("{} Done", done_column));
     }
-    if parts.len() > 1 {
+    // The split says what "done" is made of, so it shows whenever any of
+    // it is not the Done column: `Done: 6 (13%)` read as six tickets in Done
+    // when they were all Tech Complete.
+    if parts.len() > 1 || (parts.len() == 1 && done_column == 0) {
         format!("{} = {}", head, parts.join(" + "))
     } else {
         head
@@ -1930,9 +1958,10 @@ pub fn sprint_report_slack(app: &App) -> String {
     if !data.epics.is_empty() {
         r.push_str("\n*By EPIC / root ticket*\n");
         for g in &data.epics {
-            let name = g
-                .root
-                .group_name(&|e: &Item| issue_link_slack(e, &app.config.owner));
+            let name = g.root.group_name_with(
+                &|e: &Item| issue_link_slack(e, &app.config.owner),
+                &crate::slack::webhook::escape_mrkdwn,
+            );
             r.push_str(&format!("• {}\n", epic_group_line(g, &name)));
         }
     }
@@ -2020,7 +2049,7 @@ pub fn sprint_report_slack(app: &App) -> String {
             };
             r.push_str(&format!(
                 "• {}{} {} ({}, {}, failed {}×){}\n",
-                epic_tag(rt.item, &app.items),
+                epic_tag_slack(rt.item, &app.items),
                 num,
                 title_slack(rt.item),
                 prio,
@@ -2049,7 +2078,7 @@ pub fn sprint_report_slack(app: &App) -> String {
             };
             r.push_str(&format!(
                 "• {}{} {} | {} | {} | {}\n",
-                epic_tag(bug, &app.items),
+                epic_tag_slack(bug, &app.items),
                 num,
                 title_slack(bug),
                 prio,
@@ -2468,9 +2497,25 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_move_into_uat_is_not_qa_action() {
-        // Devs deploy to UAT and move the ticket there - not a QA action
-        assert_eq!(classify_status_change(Some("In QA"), Some("In UAT")), None);
+    fn test_classify_move_into_uat() {
+        // Only the user's own events are classified. In QA -> In UAT is the
+        // QA's Move to In UAT (`I`): reported as the move, not as a comment.
+        assert_eq!(
+            classify_status_change(Some("In QA"), Some("In UAT")),
+            Some(ActionKind::WorkedOn {
+                from: "In QA".into(),
+                to: "In UAT".into()
+            })
+        );
+        // Any other way into In UAT is still a dev's deploy step.
+        assert_eq!(
+            classify_status_change(Some("In QA - Dev"), Some("In UAT")),
+            None
+        );
+        assert_eq!(
+            classify_status_change(Some("In Progress"), Some("In UAT")),
+            None
+        );
     }
 
     #[test]
@@ -3607,6 +3652,50 @@ mod tests {
                 .iter()
                 .map(|a| a.kind.full_description())
                 .collect::<Vec<_>>()
+        );
+
+        // Monday morning: the bug was filed on the last day of the sprint
+        // that ended, and the board now shows the next one.
+        app.items[0].sprint = Some("Sprint 29".into());
+        app.board_sprint_filter = Some("Sprint 30".into());
+        let data = collect_daily_standup(&app);
+        assert_eq!(data.issues_found.len(), 1, "any sprint");
+        assert!(data.tested.is_empty());
+    }
+
+    #[test]
+    fn test_done_split_shows_whenever_done_is_not_the_done_column() {
+        assert_eq!(
+            done_line(6, 13.0, 6, 0, 0),
+            "Done: 6 (13%) = 6 Tech Complete"
+        );
+        assert_eq!(done_line(6, 13.0, 0, 0, 6), "Done: 6 (13%)");
+        assert_eq!(
+            done_line(14, 13.0, 6, 0, 8),
+            "Done: 14 (13%) = 6 Tech Complete + 8 Done"
+        );
+    }
+
+    #[test]
+    fn test_slack_root_names_are_escaped() {
+        let items = vec![
+            Item {
+                id: "e".into(),
+                number: Some(1),
+                title: "[Epic] R&D <beta> tools".into(),
+                labels: vec!["Epic".into()],
+                ..Default::default()
+            },
+            Item {
+                id: "t".into(),
+                number: Some(2),
+                parent_number: Some(1),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            epic_tag_slack(&items[1], &items),
+            "[R&amp;D &lt;beta&gt; tools] "
         );
     }
 }

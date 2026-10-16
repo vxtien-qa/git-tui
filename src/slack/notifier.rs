@@ -66,7 +66,8 @@ fn format_action_message(
     // User-supplied text (titles, comment bodies, display names) is escaped so
     // Slack can't interpret it - otherwise "<!channel>" in a ticket title
     // would ping the whole channel. Links/mentions built by US stay raw.
-    let title = webhook::escape_mrkdwn(title);
+    // One line: a title with a pasted newline split the message in two.
+    let title = webhook::escape_mrkdwn(&crate::models::root::clean_title(title));
     let mut msg = format!("{} *[{}]* {}{}", icon, action_label, issue_link, title);
     if !actor.is_empty() {
         msg.push_str(&format!(" - by {}", webhook::escape_mrkdwn(actor)));
@@ -226,7 +227,7 @@ fn format_batch(
         msg.push_str(&format!(
             "• {}{}\n",
             link,
-            webhook::escape_mrkdwn(&item.title)
+            webhook::escape_mrkdwn(&crate::models::root::clean_title(&item.title))
         ));
     }
 
@@ -396,6 +397,18 @@ mod tests {
         assert!(msg.starts_with("✅ *[Ready for release]* Verified on UAT\n"));
         assert!(!msg.contains("regression"));
         assert!(msg.contains("4019"));
+    }
+
+    #[test]
+    fn test_batch_titles_stay_on_one_line() {
+        let items = vec![ReleaseItem {
+            number: Some(7),
+            repo: None,
+            title: "Pasted\ntitle  ".to_string(),
+        }];
+        let msg = format_release_ready("", &items, &[], &HashMap::new());
+        assert!(msg.contains("Pasted title"), "{}", msg);
+        assert!(!msg.contains("Pasted\n"), "{}", msg);
     }
 
     #[test]
