@@ -340,7 +340,9 @@ repository; the Markdown copy's code spans matched as CommonMark does (a
 guessed match let a title repoint its link); Issues found across sprints;
 and the deploy check counting a PR's branch head, because be-compliance-api
 promotes fixes through per-environment branches and the develop merge commit
-never reaches staging.
+never reaches staging. Checkpoint 23, decided with the QA: a sprint's QA
+Results count the verdicts given during it, whichever sprint the ticket is in
+now, so a fail sent to Next is not lost from both sprints.
 
 ## Checkpoints
 
@@ -375,6 +377,7 @@ the footers, so the QA can stop at any tag and test by hand. To drop a step:
 | `cp/20-search-roots` | Search, parent repository, Markdown escaping |
 | `cp/21-reports` | Standup, Done line, Slack text |
 | `cp/22-deploy-head` | Deploy check reads the PR's branch head too |
+| `cp/23-qa-results-window` | QA Results count the sprint's verdicts wherever the ticket is now |
 
 ## Release
 

@@ -1268,6 +1268,15 @@ impl App {
             .and_then(|o| o.start_date)
     }
 
+    /// The first day after the sprint, when its iteration carries a length.
+    pub fn sprint_end_date(&self, name: &str) -> Option<NaiveDate> {
+        let option = self.sprint_field().and_then(|f| f.find_option(name))?;
+        let days = option.duration_days.filter(|d| *d > 0)?;
+        option
+            .start_date
+            .map(|start| start + chrono::Duration::days(days))
+    }
+
     /// Today's date in the configured timezone.
     fn today_local(&self) -> NaiveDate {
         let offset = FixedOffset::east_opt(self.config.timezone_offset_hours * 3600)

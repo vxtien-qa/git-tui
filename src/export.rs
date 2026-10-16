@@ -246,6 +246,8 @@ struct SprintReportData<'a> {
     missing_history: usize,
     /// First day of the sprint when the QA metrics are scoped to it.
     metrics_since: Option<NaiveDate>,
+    /// Of `tested_count`, the tickets that sit in another sprint now.
+    tested_elsewhere: usize,
     total: usize,
     /// Completed tickets: Tech Complete, Ready for Release and Done.
     done_count: usize,
@@ -325,7 +327,17 @@ fn latest_qa_verdict(
     tl: &ItemTimeline,
     since: Option<DateTime<Utc>>,
 ) -> Option<(QaVerdict, DateTime<Utc>)> {
-    let in_window = |at: DateTime<Utc>| since.is_none_or(|s| at >= s);
+    latest_qa_verdict_in(tl, since, None)
+}
+
+/// [`latest_qa_verdict`] within `[since, until)`: a sprint's own days.
+fn latest_qa_verdict_in(
+    tl: &ItemTimeline,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> Option<(QaVerdict, DateTime<Utc>)> {
+    let in_window =
+        |at: DateTime<Utc>| since.is_none_or(|s| at >= s) && until.is_none_or(|u| at < u);
     let mut best: Option<(QaVerdict, DateTime<Utc>)> = None;
 
     for e in &tl.status_events {
@@ -801,11 +813,20 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
         .board_sprint_filter
         .as_deref()
         .and_then(|s| app.sprint_start_date(s));
-    let since_utc: Option<DateTime<Utc>> = metrics_since.and_then(|d| {
+    let local_midnight = |d: NaiveDate| {
         fixed_offset(tz)
             .from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
             .single()
             .map(|dt| dt.with_timezone(&Utc))
+    };
+    let since_utc: Option<DateTime<Utc>> = metrics_since.and_then(local_midnight);
+    // The sprint's last day too, so a past sprint's report holds its own
+    // verdicts and not the next sprint's.
+    let until_utc: Option<DateTime<Utc>> = since_utc.and_then(|_| {
+        app.board_sprint_filter
+            .as_deref()
+            .and_then(|s| app.sprint_end_date(s))
+            .and_then(local_midnight)
     });
 
     let items: Vec<_> = app
@@ -854,7 +875,7 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
         // where the ticket stands today, for the retest list.
         let (verdict, verdict_all) = if has_history {
             (
-                latest_qa_verdict(&tl, since_utc),
+                latest_qa_verdict_in(&tl, since_utc, until_utc),
                 latest_qa_verdict(&tl, None),
             )
         } else {
@@ -950,6 +971,47 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
                 fail_count,
                 currently_failed: matches!(verdict_all, Some((QaVerdict::Failed, _))),
             });
+        }
+    }
+
+    // Verdicts given during the sprint on tickets that are in another sprint
+    // now: failed and sent to the next one, or a carry-over tested before it
+    // moved. Without them a fail moved to Next counted in neither sprint.
+    // Read from memory only (the sync keeps active and finished tickets'
+    // timelines), and counted under their root so the rollup still adds up.
+    let mut tested_elsewhere = 0usize;
+    if since_utc.is_some() {
+        for item in app.items.iter().filter(|i| {
+            i.sprint.as_deref() != app.board_sprint_filter.as_deref() && i.status_history.is_some()
+        }) {
+            let tl = load_timeline_for_item(item, &timeline_cache);
+            let Some((verdict, _)) = latest_qa_verdict_in(&tl, since_utc, until_utc) else {
+                continue;
+            };
+            tested_elsewhere += 1;
+            tested_count += 1;
+            let root = resolve_root(item, &app.items);
+            let group = epic_groups.entry(root.key()).or_insert_with(|| EpicGroup {
+                root,
+                tickets: 0,
+                bugs: 0,
+                in_qa: 0,
+                in_uat: 0,
+                tested: 0,
+                passed: 0,
+                failed: 0,
+            });
+            group.tested += 1;
+            match verdict {
+                QaVerdict::Passed => {
+                    passed_count += 1;
+                    group.passed += 1;
+                }
+                QaVerdict::Failed => {
+                    failed_count += 1;
+                    group.failed += 1;
+                }
+            }
         }
     }
 
@@ -1055,6 +1117,7 @@ fn collect_sprint_report(app: &App) -> SprintReportData<'_> {
         date,
         missing_history,
         metrics_since,
+        tested_elsewhere,
         total,
         done_count,
         done_pct,
@@ -1516,7 +1579,12 @@ pub fn daily_standup_slack(app: &App) -> String {
 /// One line of the "By EPIC" section. `name` carries the format-specific epic
 /// link.
 fn epic_group_line(g: &EpicGroup, name: &str) -> String {
-    let mut s = format!("{} - {} tickets", name, g.tickets);
+    // A root whose tested tickets all moved on to another sprint.
+    let mut s = if g.tickets == 0 {
+        format!("{} - none left in this sprint", name)
+    } else {
+        format!("{} - {} tickets", name, g.tickets)
+    };
     if g.bugs > 0 {
         s.push_str(&format!(" ({} bugs)", g.bugs));
     }
@@ -1607,9 +1675,14 @@ fn done_line(
 
 /// "39 tested since Sep 14" - the window the QA metrics cover, when scoped.
 fn tested_summary(d: &SprintReportData) -> String {
-    match d.metrics_since {
+    let head = match d.metrics_since {
         Some(day) => format!("{} tested since {}", d.tested_count, day.format("%b %d")),
         None => format!("{} tested", d.tested_count),
+    };
+    if d.tested_elsewhere > 0 {
+        format!("{}, {} now in another sprint", head, d.tested_elsewhere)
+    } else {
+        head
     }
 }
 
@@ -3368,6 +3441,60 @@ mod tests {
         assert!(data.retest_items[0].currently_failed);
         let epic_tested: usize = data.epics.iter().map(|g| g.tested).sum();
         assert_eq!(epic_tested, data.tested_count);
+    }
+
+    #[test]
+    fn test_a_fail_moved_to_the_next_sprint_counts_where_it_happened() {
+        use crate::app::App;
+        use crate::models::field::{Field, FieldOption, FieldType};
+        let iteration = |name: &str, start: (i32, u32, u32)| FieldOption {
+            id: name.into(),
+            name: name.into(),
+            start_date: NaiveDate::from_ymd_opt(start.0, start.1, start.2),
+            duration_days: Some(14),
+        };
+        let mut app = App::new();
+        app.fields = vec![Field {
+            id: "f".into(),
+            name: "Sprint".into(),
+            field_type: FieldType::Iteration,
+            options: vec![
+                iteration("Sprint 30", (2026, 9, 28)),
+                iteration("Sprint 31", (2026, 10, 12)),
+            ],
+        }];
+        // Failed on Oct 9, in Sprint 30, and sent to Sprint 31 with Next.
+        app.items = vec![Item {
+            id: "moved".into(),
+            number: Some(100),
+            title: "failed and moved on".into(),
+            status: Status::InProgress,
+            sprint: Some("Sprint 31".into()),
+            status_history: Some(vec![status_evt(
+                "In QA",
+                "In Progress",
+                make_utc(2026, 10, 9, 3, 0),
+            )]),
+            ..Default::default()
+        }];
+
+        app.board_sprint_filter = Some("Sprint 30".into());
+        let s30 = collect_sprint_report(&app);
+        assert_eq!(
+            (s30.tested_count, s30.failed_count),
+            (1, 1),
+            "counted in Sprint 30"
+        );
+        assert_eq!(s30.tested_elsewhere, 1);
+        assert!(tested_summary(&s30).ends_with("1 now in another sprint"));
+        let epic_tested: usize = s30.epics.iter().map(|g| g.tested).sum();
+        assert_eq!(epic_tested, s30.tested_count, "the rollup still adds up");
+
+        // Sprint 31 began after the fail: not its verdict.
+        app.board_sprint_filter = Some("Sprint 31".into());
+        let s31 = collect_sprint_report(&app);
+        assert_eq!(s31.tested_count, 0);
+        assert_eq!(s31.retest_items.len(), 1, "still failed today");
     }
 
     #[test]
