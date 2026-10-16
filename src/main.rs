@@ -1570,6 +1570,65 @@ mod render_tests {
         assert_eq!(count_of("Done").as_deref(), Some("1"));
     }
 
+    /// Help stops scrolling once its last line is at the bottom.
+    #[test]
+    fn help_does_not_scroll_into_blank_pages() {
+        let mut app = app_with_items();
+        app.screen = Screen::Help;
+        app.help_scroll = 10_000;
+        let rows = screen_rows(&mut app, 80, 24);
+        assert!(app.help_scroll < 10_000);
+        assert!(
+            rows.iter().any(|r| r.contains("Ctrl+C")),
+            "the last section is on screen"
+        );
+        // One ↑ from there moves the view at once.
+        let before = app.help_scroll;
+        app.help_scroll -= 1;
+        screen_rows(&mut app, 80, 24);
+        assert_eq!(app.help_scroll, before - 1);
+    }
+
+    /// My Tasks pulls the cursor row into view, and does not leave the last
+    /// page half empty, whatever scroll the key handler or a resize left.
+    #[test]
+    fn my_tasks_keeps_the_cursor_in_view() {
+        let mut app = app_with_items();
+        app.screen = Screen::MyTasks;
+        app.list_selected = 0;
+        app.list_scroll = 50;
+        screen_rows(&mut app, 80, 24);
+        assert_eq!(app.list_scroll, 0);
+
+        // The last row on a short terminal: scrolled to, not past.
+        let last = app.my_tasks_rows().len() - 1;
+        app.list_selected = last;
+        app.list_scroll = 0;
+        let rows = screen_rows(&mut app, 60, 10);
+        assert!(app.list_scroll > 0);
+        assert!(
+            rows.iter().any(|r| r.contains(ui::theme::icon_arrow())),
+            "cursor row on screen: {:#?}",
+            rows
+        );
+    }
+
+    /// The form footers keep Submit when the sidebar takes width.
+    #[test]
+    fn form_footers_keep_submit_beside_the_sidebar() {
+        for screen in [Screen::BugReport(Some(2), true), Screen::TaskForm(Some(2))] {
+            let mut app = app_with_items();
+            app.screen = screen.clone();
+            let rows = screen_rows(&mut app, 120, 35);
+            assert!(
+                rows.last().is_some_and(|r| r.contains("Ctrl+S:Submit")),
+                "{:?}: {:?}",
+                screen,
+                rows.last()
+            );
+        }
+    }
+
     /// Popups sit on top of every screen, so they get the same treatment.
     #[test]
     fn every_popup_renders_at_every_size() {

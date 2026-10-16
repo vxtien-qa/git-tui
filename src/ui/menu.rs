@@ -268,16 +268,18 @@ pub fn render(f: &mut Frame, app: &App, area: Rect, with_menu_list: bool) {
             theme::dim(),
         )));
     } else {
+        // One label column wide enough for "Waiting for deploy", so the
+        // counts line up under each other.
         for (status, items) in &groups {
             lines.push(Line::from(vec![
-                Span::styled(format!("    {:<16}", status.label()), theme::dim()),
+                Span::styled(format!("    {:<20}", status.label()), theme::dim()),
                 Span::styled(format!("{}", items.len()), theme::status_style(status)),
             ]));
         }
         if waiting > 0 {
             lines.push(Line::from(vec![
-                Span::styled("    Waiting for deploy", theme::dim()),
-                Span::styled(format!("  {}", waiting), theme::dim()),
+                Span::styled(format!("    {:<20}", "Waiting for deploy"), theme::dim()),
+                Span::styled(format!("{}", waiting), theme::dim()),
             ]));
         }
     }

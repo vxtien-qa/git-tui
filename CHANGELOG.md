@@ -41,6 +41,10 @@ All notable changes to git-tui. Versions follow [semantic versioning](https://se
 - Confirm, error and success popups grow to fit their text. A message of two lines or more pushed the `[Enter/y] Confirm  [Esc/n] Cancel` row, or `Press any key to dismiss`, off the bottom of the popup, so every UAT confirm hid its keys. On a short terminal the spacer rows, then the end of the message, give way; the keys never do. The text also keeps a margin from the right border.
 - Item Detail puts `Created` on its own row when the Labels value is too long for its column; `Ready-for-UATCreated` ran together.
 - A progress note such as `Pass UAT: verifying 1 ticket(s)...` clears when the result pops up, instead of staying under it for six seconds.
+- The bug, enhancement and task forms keep `Ctrl+S:Submit` in their footer when the sidebar takes width; it was the first hint to be dropped. The bug form's Parent line ends in `..` instead of running into the border.
+- Help stops scrolling once its last line is at the bottom; `↓` ran on into blank pages, each one costing an `↑` to come back.
+- My Tasks pulls the cursor row back on screen after a resize or a refresh, and stops scrolling when the last row reaches the bottom instead of leaving the last page half empty.
+- The menu's Your queue counts line up under each other.
 - The bug and enhancement form leaves Priority and Stack at `--`. The defaults were written for selectors without `--` in front and became P1 and FE, which also skipped the wait for GitHub's priority automation.
 - Search scrolls its filter panel to keep the option under the cursor visible; on an 80x24 terminal a long filter row put it below the panel's edge.
 - The Slack notification toggles scroll to the cursor; at 80x24 the last rows were below the panel.

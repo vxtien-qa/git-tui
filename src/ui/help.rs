@@ -50,7 +50,7 @@ fn wrap_key_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>>
 }
 
 /// Render help as a full content panel with scroll support.
-pub fn render(f: &mut Frame, app: &App, area: Rect) {
+pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -247,7 +247,10 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
     let inner_w = chunks[0].width.saturating_sub(2) as usize;
     let lines = wrap_key_lines(lines, inner_w);
 
-    // Apply scroll
+    // Apply scroll, stopping once the last line is at the bottom: ↓ used to
+    // run on into blank pages, each one costing an ↑ to come back.
+    let view_h = chunks[0].height.saturating_sub(2) as usize;
+    app.help_scroll = app.help_scroll.min(lines.len().saturating_sub(view_h));
     let visible: Vec<Line> = lines.into_iter().skip(app.help_scroll).collect();
 
     let block = Block::default()

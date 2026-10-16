@@ -145,12 +145,14 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
 
     // Footer
     let footer = super::utils::footer_line(
+        // Submit right after Tab: footer_line drops from the end, and it
+        // used to drop Submit whenever the sidebar was on screen.
         &[
             ("Tab", "Next field"),
+            ("Ctrl+S", "Submit"),
             (theme::icon_up_down(), "Line/Field"),
             (theme::icon_left_right(), "Select"),
             ("Ctrl+V", "Paste"),
-            ("Ctrl+S", "Submit"),
             ("Esc", "Back (draft kept)"),
         ],
         area.width as usize,

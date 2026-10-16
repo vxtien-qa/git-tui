@@ -58,6 +58,8 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     let mut global_idx = 0;
+    // First and last line of the selected row, to keep it in view.
+    let mut selected_lines: Option<(usize, usize)> = None;
 
     let groups = app.my_tasks_by_status();
 
@@ -118,6 +120,7 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
             // Full title
             let title = trunc(&item.title, title_w);
 
+            let first_line = lines.len();
             // Main line
             lines.push(Line::from(vec![
                 Span::styled(format!(" {} ", prefix), style),
@@ -152,6 +155,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::raw("              "),
                     Span::styled(parts.join("  "), theme::highlight()),
                 ]));
+            }
+            if is_selected {
+                selected_lines = Some((first_line, lines.len() - 1));
             }
 
             global_idx += 1;
@@ -196,6 +202,9 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
                 (" ", theme::dim())
             };
             // The deploy note is the point of the row: the title gives way.
+            if is_selected {
+                selected_lines = Some((lines.len(), lines.len()));
+            }
             let note = format!("  {} {}", theme::icon_right_arrow(), target);
             let room = col_w
                 .saturating_sub(10 + note.chars().count())
@@ -209,6 +218,20 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(""));
     }
 
+    // The key handler scrolls by its own line arithmetic; here the cursor
+    // row is pulled back into view (after a resize or a refresh it could sit
+    // below the viewport) and the list's end stays at the bottom instead of
+    // leaving the last page half empty.
+    let view = app.list_view_height.max(1);
+    if let Some((first, last)) = selected_lines {
+        if last >= app.list_scroll + view {
+            app.list_scroll = (last + 1).saturating_sub(view);
+        }
+        if first < app.list_scroll {
+            app.list_scroll = first;
+        }
+    }
+    app.list_scroll = app.list_scroll.min(lines.len().saturating_sub(view));
     let visible: Vec<Line> = lines.into_iter().skip(app.list_scroll).collect();
 
     let block = Block::default()

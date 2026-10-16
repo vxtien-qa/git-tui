@@ -323,7 +323,10 @@ one popup line per PR and branch; a failed PR refresh showing "could not load"
 over the last list while `d` refused to run; and smaller gaps (pick-list
 legend and cursor, My Tasks footer per row, QA menu layouts down to 60x10, the
 Fail sprint row naming the parent, filter-row position, toggle order, labels
-running into `Created`, a stale progress note).
+running into `Created`, a stale progress note). Checkpoint 17 fixes four older
+UI bugs found on the way: form footers dropping `Ctrl+S:Submit` beside the
+sidebar, Help scrolling into blank pages, the My Tasks cursor left off screen
+by a resize, and the menu's queue counts out of line.
 
 ## Checkpoints
 
@@ -352,6 +355,7 @@ the footers, so the QA can stop at any tag and test by hand. To drop a step:
 | `cp/14-docs-ui` | Help wrapping, small-terminal popups, docs |
 | `cp/15-final-fixes` | Findings of the final review |
 | `cp/16-ui-sweep` | UI sweep fixes for the new flows |
+| `cp/17-old-ui-bugs` | Older UI bugs found in the sweep |
 
 ## Release
 

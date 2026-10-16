@@ -61,7 +61,10 @@ pub fn render(f: &mut Frame, app: &App, parent_idx: Option<usize>, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled("  Parent:    ", theme::dim()),
             Span::styled(
-                format!("#{} {}", parent.number.unwrap_or(0), parent.title),
+                super::utils::trunc(
+                    &format!("#{} {}", parent.number.unwrap_or(0), parent.title),
+                    (area.width as usize).saturating_sub(16),
+                ),
                 theme::normal(),
             ),
         ]));
@@ -261,12 +264,14 @@ pub fn render(f: &mut Frame, app: &App, parent_idx: Option<usize>, area: Rect) {
 
     // Footer
     let footer = super::utils::footer_line(
+        // Submit right after Tab: footer_line drops from the end, and it
+        // used to drop Submit whenever the sidebar was on screen.
         &[
             ("Tab", "Next field"),
+            ("Ctrl+S", "Submit"),
             (theme::icon_up_down(), "Line/Field"),
             (theme::icon_left_right(), "Select"),
             ("Ctrl+V", "Paste"),
-            ("Ctrl+S", "Submit"),
             ("Esc", "Back (draft kept)"),
         ],
         area.width as usize,
